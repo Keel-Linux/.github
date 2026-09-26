@@ -1,0 +1,109 @@
+#!/bin/bash
+# A change that ships must come with a changelog entry.
+#
+# usage: require-changelog BASE HEAD [CHANGELOG] [EXEMPT]
+#
+#   BASE, HEAD  the two commits of the pull request
+#   CHANGELOG   default debian/changelog
+#   EXEMPT      extended regular expression of paths that ship nothing
+#
+# Exit codes:
+#   0  nothing that ships changed, or the changelog has a new, greater entry
+#   1  a change that ships has no new changelog entry
+#   2  the version did not increase
+#   3  the arguments or the repository are not usable
+#
+# Why this exists: on 2026-09-26 confconsole's Instance menu and console mark
+# were merged with no entry in debian/changelog, so the newest installable
+# confconsole stayed 2.2.3+keel1 and neither change reached an appliance. The
+# code was on master, the gate was green, and the image did not have it.
+set -uo pipefail
+
+EXEMPT_DEFAULT='^(tests/|docs/|\.github/|README|COVERAGE\.md|LICENSE|\.gitignore)'
+
+die() {
+    echo "require-changelog: $2" >&2
+    exit "$1"
+}
+
+# changed_paths BASE HEAD: the paths the pull request touches, one per line.
+changed_paths() {
+    git diff --name-only "$1" "$2"
+}
+
+# shipped_paths CHANGELOG EXEMPT: the changed paths that ship something.
+# Reads the changed paths on stdin. The changelog itself never counts.
+shipped_paths() {
+    local changelog="$1" exempt="$2" path
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        [[ "$path" != "$changelog" ]] || continue
+        [[ ! "$path" =~ $exempt ]] || continue
+        printf '%s\n' "$path"
+    done
+}
+
+# entry_version LINE: the version of a changelog entry line, empty when the
+# line is not one: "confconsole (2.2.3+keel2) trixie; urgency=low".
+entry_version() {
+    local line="$1"
+    [[ "$line" =~ ^[a-z0-9][a-z0-9.+-]*\ \(([^\)]+)\) ]] || return 1
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+# version_increased BEFORE AFTER: whether AFTER is greater, by dpkg's order.
+version_increased() {
+    local before="$1" after="$2"
+    [[ -n "$before" ]] || return 0
+    [[ -n "$after" ]] || return 1
+    dpkg --compare-versions "$after" gt "$before"
+}
+
+main() {
+    local base head changelog exempt changed shipped before after
+    base=${1:-}
+    head=${2:-}
+    changelog=${3:-debian/changelog}
+    exempt=${4:-$EXEMPT_DEFAULT}
+
+    [[ -n "$base" && -n "$head" ]] || die 3 "usage: require-changelog BASE HEAD [CHANGELOG] [EXEMPT]"
+    git rev-parse --git-dir >/dev/null 2>&1 || die 3 "not a git repository"
+    git cat-file -e "$base^{commit}" 2>/dev/null || die 3 "base commit $base is not here"
+    git cat-file -e "$head^{commit}" 2>/dev/null || die 3 "head commit $head is not here"
+
+    if [[ ! -f "$changelog" ]]; then
+        echo "require-changelog: $changelog does not exist, nothing to require"
+        return 0
+    fi
+
+    changed=$(changed_paths "$base" "$head") || die 3 "cannot diff $base against $head"
+    shipped=$(shipped_paths "$changelog" "$exempt" <<< "$changed")
+    if [[ -z "$shipped" ]]; then
+        echo "require-changelog: nothing that ships changed"
+        return 0
+    fi
+
+    echo "require-changelog: changed paths that ship:"
+    while IFS= read -r path; do
+        echo "  $path"
+    done <<< "$shipped"
+
+    before=$(git show "$base:$changelog" 2>/dev/null | head -1)
+    after=$(head -1 "$changelog")
+    if [[ "$before" == "$after" ]]; then
+        die 1 "$changelog still starts with the entry of the base branch, so this change cannot be installed: $after"
+    fi
+
+    local before_version after_version
+    before_version=$(entry_version "$before") || before_version=
+    after_version=$(entry_version "$after") || after_version=
+    if ! version_increased "$before_version" "$after_version"; then
+        die 2 "$after_version is not greater than $before_version"
+    fi
+    echo "require-changelog: $changelog: ${before_version:-none} to ${after_version:-unreadable}"
+    return 0
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

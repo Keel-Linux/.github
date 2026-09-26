@@ -1,0 +1,77 @@
+# Reusable: a pull request that changes what the package ships must also add a
+# changelog entry, so the change can reach a machine.
+#
+# Today's lesson, 2026-09-26: confconsole's Instance menu and console mark were
+# merged with no entry in debian/changelog, so the newest installable
+# confconsole stayed 2.2.3+keel1 and neither change reached the appliance. The
+# code was on master, the gate was green, and the image did not have it, which
+# was then read as the menu never having been written.
+#
+# The rule is bin/require-changelog of this repository, which the job checks
+# out and runs: the logic is a tested script rather than shell inside YAML
+# (decision 0004), measured by tests/coverage.sh here.
+#
+# A caller job named "package" produces the status check "package / changelog".
+name: require-changelog
+
+on:
+  workflow_call:
+    inputs:
+      changelog:
+        description: path of the Debian changelog
+        required: false
+        type: string
+        default: debian/changelog
+      exempt:
+        description: |
+          extended regular expression of paths that ship nothing, matched
+          against each changed path
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check out the shared tooling
+        uses: actions/checkout@v4
+        with:
+          repository: keel-linux/.github
+          ref: main
+          path: .keel-ci
+      - name: A change that ships needs a changelog entry
+        env:
+          CHANGELOG: ${{ inputs.changelog }}
+          EXEMPT: ${{ inputs.exempt }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -o pipefail
+          status=0
+          if [ -n "$EXEMPT" ]; then
+            .keel-ci/bin/require-changelog "$BASE" "$HEAD" "$CHANGELOG" "$EXEMPT" \
+              2>&1 | tee changelog.txt || status=$?
+          else
+            .keel-ci/bin/require-changelog "$BASE" "$HEAD" "$CHANGELOG" \
+              2>&1 | tee changelog.txt || status=$?
+          fi
+          {
+            echo "## Changelog"
+            echo '```'
+            tail -n 20 changelog.txt
+            echo '```'
+            if [ "$status" -ne 0 ]; then
+              echo
+              echo "A change that ships without a new changelog entry cannot be"
+              echo "installed, so it never reaches an appliance."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

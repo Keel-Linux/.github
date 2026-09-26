@@ -33,6 +33,23 @@ the job, informational ones included. The check is named after the job alone,
 `actionlint`, because this workflow is not called through another one, and it
 is required on `main`.
 
+## require-changelog
+
+`require-changelog.yml` is reusable and enforces one rule: a pull request that
+changes a file the package ships must also add a changelog entry, with a
+greater version. Changes to tests, documentation and CI ship nothing and are
+exempt. Its logic is `bin/require-changelog` of this repository, which the job
+checks out and runs, so the rule is a tested script rather than shell inside a
+workflow. Inputs: `changelog` (default `debian/changelog`) and `exempt`, an
+extended regular expression. A caller job named `package` produces the check
+`package / changelog`.
+
+The rule exists because on 2026-09-26 the Instance menu and the console mark
+were merged into confconsole with no entry, so the newest installable
+confconsole stayed at the previous version and neither change reached an
+appliance: the code was on the default branch, the gate was green, and the
+image did not have it.
+
 ## The workflows
 
 - `test-python.yml`: pytest under coverage.py, branch coverage,
