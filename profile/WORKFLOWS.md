@@ -29,7 +29,8 @@ whole organization at once and nothing downstream can catch it. actionlint,
 pinned by version and by digest, parses each workflow, checks the expressions,
 the runner labels (`.github/actionlint.yaml` declares `keel-lxc`) and the
 action inputs, and runs shellcheck over every `run` block. Any report fails
-the job, informational ones included. The check is `lint / actionlint`, and it
+the job, informational ones included. The check is named after the job alone,
+`actionlint`, because this workflow is not called through another one, and it
 is required on `main`.
 
 ## The workflows
