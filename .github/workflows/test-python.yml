@@ -1,0 +1,51 @@
+name: test-python
+
+on:
+  workflow_call:
+    inputs:
+      threshold:
+        description: minimum coverage percentage (lines and branches)
+        required: true
+        type: number
+      package:
+        description: python package or source directory to measure
+        required: true
+        type: string
+      tests:
+        description: tests directory
+        required: false
+        type: string
+        default: tests
+      python-version:
+        required: false
+        type: string
+        default: "3.13"
+      apt-packages:
+        description: extra Debian packages needed by the tests
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install test tools
+        run: |
+          if [ -n "${{ inputs.apt-packages }}" ]; then sudo apt-get update -qq && sudo apt-get install -y -qq ${{ inputs.apt-packages }}; fi
+          python -m pip install --quiet pytest coverage pyyaml
+          if [ -f pyproject.toml ]; then python -m pip install --quiet -e . || true; fi
+      - name: Run tests under coverage
+        run: |
+          PYTHONPATH=. python -m coverage run --branch --source=${{ inputs.package }} -m pytest -q ${{ inputs.tests }}
+      - name: Enforce threshold
+        run: |
+          python -m coverage report --show-missing --fail-under=${{ inputs.threshold }} | tee coverage.txt
+          echo '## Coverage' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 15 coverage.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

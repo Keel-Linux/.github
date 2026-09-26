@@ -1,0 +1,28 @@
+name: test-appliance
+
+on:
+  workflow_call:
+    inputs:
+      appliance:
+        description: appliance name without the keel- prefix (core, lamp, wordpress)
+        required: true
+        type: string
+      parent:
+        description: parent layer name, empty for core
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build-and-boot:
+    runs-on: [self-hosted, keel-lxc]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the layer
+        run: |
+          export FAB_PATH=/turnkey/fab RELEASE=debian/trixie FAB_ARCH=amd64 TERM=dumb
+          if [ -n "${{ inputs.parent }}" ]; then /turnkey/buildtasks/bt-layer "${{ inputs.appliance }}" --parent "${{ inputs.parent }}"; else /turnkey/buildtasks/bt-layer "${{ inputs.appliance }}"; fi
+      - name: Verify, assemble and boot
+        run: |
+          keel verify --layers-dir /mnt/builds/layers --non-interactive || test $? -eq 8
+          tests/boot-test.sh "${{ inputs.appliance }}"
