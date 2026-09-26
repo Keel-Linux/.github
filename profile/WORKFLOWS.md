@@ -15,7 +15,7 @@ GitHub names the check after the caller's job id and the reusable job id:
 | --- | --- | --- |
 | `test-python.yml` | `coverage` | `tests / coverage` |
 | `test-shell.yml` | `coverage` | `tests / coverage` |
-| `test-appliance.yml` | `build-and-boot` | `tests / build-and-boot` |
+| `test-appliance.yml` | `build-and-boot` | `appliance / build-and-boot` (caller job id `appliance`) |
 | `build-deb.yml` | `deb` | `package / deb` (caller job id `package`) |
 
 Renaming a caller job renames the check and breaks the protection rule that
@@ -35,10 +35,20 @@ requires it, so keep the job id `tests`.
   Bootstrap rule: if the script is absent and the threshold is 0 the job
   passes with a notice (nothing is measured yet); if the script is absent and
   the threshold is above 0 the job fails. shellcheck runs first, advisory.
-- `test-appliance.yml`: builds the appliance layer with bt-layer on the
-  self-hosted LXC runner (labels `self-hosted, keel-lxc`), verifies it,
-  assembles it and boots it; the repository provides `tests/boot-test.sh`.
-  Inputs: `appliance`, `parent`. Inactive until the runner is registered.
+- `test-appliance.yml`: fetches the appliance's layers from
+  `https://mirror.keellinux.org/layers` over IPv6 on the self-hosted LXC
+  runner (labels `self-hosted, keel-lxc`), verifies them, assembles the chain
+  into a scratch rootfs, boots it in an LXC container named after the run and
+  runs the repository's `tests/boot-test.sh` against it; the container and
+  the scratch tree are destroyed in a cleanup step that also runs after a
+  failure. It builds nothing: the runner has no fab, deck or buildtasks, so
+  the build host publishes the layers and this job consumes them. `keel`
+  comes from a checkout of `keel-linux/keel` at `main`, because nothing is
+  packaged or signed yet (decision 0005). Inputs: `appliance`, `parent`
+  (checked against the parent the published manifest records, not used to
+  fetch), `timeout` (minutes, default 60). When the layer has never been
+  published the job passes with a notice and says so in the job summary, so a
+  repository can carry the gate before its first layer exists.
 - `build-deb.yml`: `dpkg-buildpackage -us -uc -b` on the self-hosted LXC
   runner, the `.deb` uploaded as a workflow artifact (input `artifact-name`,
   default `deb`; `source-dir`; `retention-days`). Inactive until the runner
@@ -83,6 +93,18 @@ jobs:
 
 The threshold is the measured baseline from the repository's `COVERAGE.md`
 and is only ever raised, never lowered (decision 0006).
+
+Appliance repository (keel-core, keel-nodebb), alongside the coverage
+caller:
+
+```yaml
+  appliance:
+    if: vars.KEEL_LXC_RUNNER == 'true'
+    uses: keel-linux/.github/.github/workflows/test-appliance.yml@main
+    with:
+      appliance: nodebb
+      parent: nodejs-nginx
+```
 
 Debian package, added once the runner exists:
 
