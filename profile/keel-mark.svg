@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Keel Linux">
+  <title>Keel Linux</title>
+  <desc>A ship's hull seen head-on in cross-section: the waterline and two strakes above it, the hull below, and the keel fin dropping from the centre of the bottom.</desc>
+  <g fill="none" stroke="#0B1F3A" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M56 112 V148 A72 72 0 0 0 200 148 V112" stroke-width="20"/>
+    <path d="M28 108 H228" stroke-width="20"/>
+    <path d="M58 72 H198" stroke-width="18"/>
+    <path d="M74 40 H182" stroke-width="18"/>
+    <path d="M128 48 V200" stroke-width="10"/>
+  </g>
+  <path d="M128 192 C142 212 142 232 128 248 C114 232 114 212 128 192 Z" fill="#16A6A0"/>
+</svg>
