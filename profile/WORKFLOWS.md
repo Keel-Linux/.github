@@ -47,8 +47,11 @@ requires it, so keep the job id `tests`.
   packaged or signed yet (decision 0005). Inputs: `appliance`, `parent`
   (checked against the parent the published manifest records, not used to
   fetch), `timeout` (minutes, default 60). When the layer has never been
-  published the job passes with a notice and says so in the job summary, so a
-  repository can carry the gate before its first layer exists.
+  published, meaning its manifest answers 404, the job passes with a notice
+  and says so in the job summary, so a repository can carry the gate before
+  its first layer exists. Any other answer, including a name that does not
+  resolve, fails the job: skipping on an outage would be a green check that
+  tested nothing.
 - `build-deb.yml`: `dpkg-buildpackage -us -uc -b` on the self-hosted LXC
   runner, the `.deb` uploaded as a workflow artifact (input `artifact-name`,
   default `deb`; `source-dir`; `retention-days`). Inactive until the runner

@@ -90,22 +90,48 @@ jobs:
           set -eu
           manifest=$SCRATCH-manifest
           mkdir -p "$(dirname "$manifest")"
-          if curl -6 -fsS -o "$manifest" "$SOURCE/$APPLIANCE.manifest"; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
+          # Only an answer of 404 means "not published yet". A name that does
+          # not resolve, a refused connection or a 5xx is the mirror being
+          # unreachable, and skipping on that would turn every outage into a
+          # green check that tested nothing.
+          #
+          # The family is left to the resolver rather than forced with -6,
+          # which is what keel pull does too. On keel-lxc-1 the mirror is this
+          # same host and its own public name resolves to the machine itself,
+          # so the request never leaves it; anywhere the name has an AAAA
+          # record it goes over IPv6.
+          status=$(curl -sS --retry 2 --retry-delay 3 -o "$manifest" \
+                     -w '%{http_code}' "$SOURCE/$APPLIANCE.manifest") || {
+            code=$?
             rm -f "$manifest"
-            echo "::notice::$SOURCE/$APPLIANCE.manifest is not on the mirror yet, so there is nothing to boot; the job passes and this is recorded in the summary"
-            {
-              echo "## Appliance test skipped"
-              echo
-              echo "The layer \`$APPLIANCE\` has never been published to \`$SOURCE/\`."
-              echo "Build it on the build host (\`bt-layer $APPLIANCE\`) and publish it"
-              echo "(docs/releases-host.md, publishing a layer); this job then boots it on"
-              echo "the next run. Nothing was built, assembled or booted."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+            echo "::error::cannot reach $SOURCE ($APPLIANCE.manifest): curl exited $code"
+            exit 1
+          }
+          case "$status" in
+            200)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              rm -f "$manifest"
+              echo "::notice::$SOURCE/$APPLIANCE.manifest is not on the mirror yet, so there is nothing to boot; the job passes and this is recorded in the summary"
+              {
+                echo "## Appliance test skipped"
+                echo
+                echo "The layer \`$APPLIANCE\` has never been published to \`$SOURCE/\`:"
+                echo "its manifest answers 404. Build it on the build host"
+                echo "(\`bt-layer $APPLIANCE\`) and publish it (docs/releases-host.md,"
+                echo "publishing a layer); this job then boots it on the next run."
+                echo "Nothing was built, assembled or booted."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              rm -f "$manifest"
+              echo "::error::$SOURCE/$APPLIANCE.manifest answered $status; only 200 and 404 are expected"
+              exit 1
+              ;;
+          esac
 
       - name: Check the published parent against the caller
         if: steps.layer.outputs.published == 'true'
