@@ -1,3 +1,11 @@
+# Reusable: the repository's tests/coverage.sh (bats under kcov) with the
+# threshold exported as COVERAGE_THRESHOLD. A caller job named "tests"
+# produces the status check "tests / coverage".
+#
+# Bootstrap rule: when the coverage script does not exist yet and the
+# threshold is 0 (nothing measured on this branch), the job succeeds with a
+# notice so the check exists and protection can require it. A missing script
+# with a threshold above 0 is a failure.
 name: test-shell
 
 on:
@@ -8,7 +16,7 @@ on:
         required: true
         type: number
       coverage-script:
-        description: repository script that runs bats under kcov and fails below the threshold
+        description: repository script that runs bats under kcov and fails below COVERAGE_THRESHOLD
         required: false
         type: string
         default: tests/coverage.sh
@@ -18,25 +26,64 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COVERAGE_THRESHOLD: ${{ inputs.threshold }}
+      COVERAGE_SCRIPT: ${{ inputs.coverage-script }}
+      APT_PACKAGES: ${{ inputs.apt-packages }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check for the coverage script
+        id: script
+        run: |
+          if [ -x "$COVERAGE_SCRIPT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ -e "$COVERAGE_SCRIPT" ]; then
+            echo "::error::$COVERAGE_SCRIPT exists but is not executable (git update-index --chmod=+x)"
+            exit 1
+          elif [ "$COVERAGE_THRESHOLD" = "0" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$COVERAGE_SCRIPT is not on this branch and the threshold is 0: nothing is measured yet, the check passes as a bootstrap placeholder"
+            {
+              echo "## Coverage"
+              echo "No coverage script (\`$COVERAGE_SCRIPT\`) on this branch and threshold 0: nothing measured yet."
+              echo "The check passes as a placeholder until the tests land and the threshold is raised."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::$COVERAGE_SCRIPT is missing but the threshold is $COVERAGE_THRESHOLD: a coverage script is required"
+            exit 1
+          fi
       - name: Install bats and kcov
+        if: steps.script.outputs.present == 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bats kcov shellcheck ${{ inputs.apt-packages }}
-      - name: Static analysis
+          sudo apt-get install -y -qq bats kcov shellcheck file $APT_PACKAGES
+      - name: Static analysis (advisory)
+        if: steps.script.outputs.present == 'true'
         run: |
           git ls-files | grep -E '^(bin/|tests/|.*\.sh$|.*\.bash$)' | xargs -r file | grep -iE 'shell script|bash' | cut -d: -f1 | xargs -r shellcheck -S warning || true
       - name: Tests and coverage gate
-        env:
-          COVERAGE_THRESHOLD: ${{ inputs.threshold }}
+        if: steps.script.outputs.present == 'true'
         run: |
-          test -x "${{ inputs.coverage-script }}" || { echo "missing ${{ inputs.coverage-script }}"; exit 1; }
-          "${{ inputs.coverage-script }}" | tee coverage.txt
-          echo '## Coverage' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          tail -n 20 coverage.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          set -o pipefail
+          status=0
+          "$COVERAGE_SCRIPT" 2>&1 | tee coverage.txt || status=$?
+          {
+            echo "## Coverage (threshold $COVERAGE_THRESHOLD percent)"
+            echo '```'
+            tail -n 20 coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.script.outputs.present == 'true'
+        with:
+          name: coverage-report
+          path: coverage.txt
+          if-no-files-found: ignore

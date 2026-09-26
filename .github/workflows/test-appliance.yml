@@ -1,3 +1,8 @@
+# Reusable: build an appliance layer with bt-layer on the self-hosted LXC
+# runner, verify it, assemble it and boot it. Inactive until a runner with
+# the labels "self-hosted, keel-lxc" is registered: a job that targets a
+# label no runner carries stays queued and is cancelled after 24 hours.
+# A caller job named "tests" produces the status check "tests / build-and-boot".
 name: test-appliance
 
 on:
@@ -13,16 +18,31 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+
 jobs:
   build-and-boot:
     runs-on: [self-hosted, keel-lxc]
+    timeout-minutes: 180
+    env:
+      APPLIANCE: ${{ inputs.appliance }}
+      PARENT: ${{ inputs.parent }}
+      FAB_PATH: /turnkey/fab
+      RELEASE: debian/trixie
+      FAB_ARCH: amd64
+      TERM: dumb
     steps:
       - uses: actions/checkout@v4
       - name: Build the layer
         run: |
-          export FAB_PATH=/turnkey/fab RELEASE=debian/trixie FAB_ARCH=amd64 TERM=dumb
-          if [ -n "${{ inputs.parent }}" ]; then /turnkey/buildtasks/bt-layer "${{ inputs.appliance }}" --parent "${{ inputs.parent }}"; else /turnkey/buildtasks/bt-layer "${{ inputs.appliance }}"; fi
+          if [ -n "$PARENT" ]; then
+            /turnkey/buildtasks/bt-layer "$APPLIANCE" --parent "$PARENT"
+          else
+            /turnkey/buildtasks/bt-layer "$APPLIANCE"
+          fi
       - name: Verify, assemble and boot
         run: |
           keel verify --layers-dir /mnt/builds/layers --non-interactive || test $? -eq 8
-          tests/boot-test.sh "${{ inputs.appliance }}"
+          test -x tests/boot-test.sh || { echo "::error::tests/boot-test.sh is missing"; exit 1; }
+          tests/boot-test.sh "$APPLIANCE"

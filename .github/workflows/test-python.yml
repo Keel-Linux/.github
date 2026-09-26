@@ -1,3 +1,5 @@
+# Reusable: pytest under coverage.py with branch coverage and a fail-under
+# gate. A caller job named "tests" produces the status check "tests / coverage".
 name: test-python
 
 on:
@@ -26,9 +28,18 @@ on:
         type: string
         default: ""
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      THRESHOLD: ${{ inputs.threshold }}
+      PACKAGE: ${{ inputs.package }}
+      TESTS: ${{ inputs.tests }}
+      APT_PACKAGES: ${{ inputs.apt-packages }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -36,16 +47,32 @@ jobs:
           python-version: ${{ inputs.python-version }}
       - name: Install test tools
         run: |
-          if [ -n "${{ inputs.apt-packages }}" ]; then sudo apt-get update -qq && sudo apt-get install -y -qq ${{ inputs.apt-packages }}; fi
+          if [ -n "$APT_PACKAGES" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq $APT_PACKAGES
+          fi
           python -m pip install --quiet pytest coverage pyyaml
-          if [ -f pyproject.toml ]; then python -m pip install --quiet -e . || true; fi
+          if [ -f pyproject.toml ]; then
+            python -m pip install --quiet -e . || echo "::warning::pip install -e . failed, running from the checkout with PYTHONPATH=."
+          fi
       - name: Run tests under coverage
         run: |
-          PYTHONPATH=. python -m coverage run --branch --source=${{ inputs.package }} -m pytest -q ${{ inputs.tests }}
+          PYTHONPATH=. python -m coverage run --branch --source="$PACKAGE" -m pytest -q "$TESTS"
       - name: Enforce threshold
         run: |
-          python -m coverage report --show-missing --fail-under=${{ inputs.threshold }} | tee coverage.txt
-          echo '## Coverage' >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          tail -n 15 coverage.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          set -o pipefail
+          status=0
+          python -m coverage report --show-missing --fail-under="$THRESHOLD" | tee coverage.txt || status=$?
+          {
+            echo "## Coverage (threshold $THRESHOLD percent)"
+            echo '```'
+            tail -n 15 coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.txt
+          if-no-files-found: ignore
