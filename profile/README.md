@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="keel-icon.png" alt="Keel Linux" width="160">
+  <img src="keel-mark-512.png" alt="Keel Linux" width="160">
 </p>
 
 <h1 align="center">Keel Linux</h1>
