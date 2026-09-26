@@ -68,6 +68,7 @@ jobs:
         if: steps.script.outputs.present == 'true'
         run: |
           sudo apt-get update -qq
+          # shellcheck disable=SC2086  # APT_PACKAGES is a space separated list
           sudo apt-get install -y -qq bats shellcheck file cmake binutils-dev \
             libssl-dev libcurl4-openssl-dev libelf-dev libdw-dev libiberty-dev \
             zlib1g-dev $APT_PACKAGES

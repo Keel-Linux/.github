@@ -1,0 +1,60 @@
+# The gate of this repository (docs/ci-cd.md).
+#
+# Every other repository calls the reusable workflows here at @main, so a
+# mistake on this branch breaks the gate of the whole organization at once and
+# nothing downstream can catch it. actionlint is that catch: it parses each
+# workflow, checks the expressions, the runner labels (.github/actionlint.yaml
+# declares keel-lxc) and the action inputs, and runs shellcheck over every run
+# block. Any report fails the job, including the informational ones, because a
+# workflow that lints clean is the only state worth defending.
+#
+# The linter is pinned by version and by digest, as kcov is in test-shell.yml:
+# a linting gate that silently follows a moving release is not a gate.
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  ACTIONLINT_VERSION: 1.7.7
+  ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+      - name: Install the pinned actionlint
+        run: |
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "$ACTIONLINT_SHA256  actionlint.tar.gz" | sha256sum -c -
+          tar xzf actionlint.tar.gz actionlint
+          ./actionlint --version
+      - name: Lint the workflows
+        run: |
+          set -o pipefail
+          status=0
+          ./actionlint -color .github/workflows/*.yml 2>&1 | tee actionlint.txt || status=$?
+          {
+            echo "## actionlint $ACTIONLINT_VERSION"
+            echo '```'
+            if [ -s actionlint.txt ]; then
+              tail -n 40 actionlint.txt
+            else
+              count=$(find .github/workflows -maxdepth 1 -name '*.yml' | wc -l)
+              echo "no findings in $count workflows"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
