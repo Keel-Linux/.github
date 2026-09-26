@@ -21,6 +21,17 @@ GitHub names the check after the caller's job id and the reusable job id:
 Renaming a caller job renames the check and breaks the protection rule that
 requires it, so keep the job id `tests`.
 
+## This repository's own gate
+
+`lint.yml` is not reusable: it guards the four workflows above. Every other
+repository calls them at `@main`, so a mistake here breaks the gate of the
+whole organization at once and nothing downstream can catch it. actionlint,
+pinned by version and by digest, parses each workflow, checks the expressions,
+the runner labels (`.github/actionlint.yaml` declares `keel-lxc`) and the
+action inputs, and runs shellcheck over every `run` block. Any report fails
+the job, informational ones included. The check is `lint / actionlint`, and it
+is required on `main`.
+
 ## The workflows
 
 - `test-python.yml`: pytest under coverage.py, branch coverage,

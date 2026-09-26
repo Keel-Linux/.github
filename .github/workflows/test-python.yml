@@ -49,6 +49,7 @@ jobs:
         run: |
           if [ -n "$APT_PACKAGES" ]; then
             sudo apt-get update -qq
+            # shellcheck disable=SC2086  # a space separated list of packages
             sudo apt-get install -y -qq $APT_PACKAGES
           fi
           python -m pip install --quiet pytest coverage pyyaml
