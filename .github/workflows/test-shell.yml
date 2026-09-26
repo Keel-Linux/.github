@@ -37,6 +37,11 @@ jobs:
       COVERAGE_THRESHOLD: ${{ inputs.threshold }}
       COVERAGE_SCRIPT: ${{ inputs.coverage-script }}
       APT_PACKAGES: ${{ inputs.apt-packages }}
+      # Ubuntu 24.04 (ubuntu-latest) ships no kcov package, so the release the
+      # baselines were measured with (43, the Debian trixie version) is built
+      # from the pinned tarball and cached between runs.
+      KCOV_VERSION: "43"
+      KCOV_SHA256: 4cbba86af11f72de0c7514e09d59c7927ed25df7cebdad087f6d3623213b95bf
     steps:
       - uses: actions/checkout@v4
       - name: Check for the coverage script
@@ -59,11 +64,36 @@ jobs:
             echo "::error::$COVERAGE_SCRIPT is missing but the threshold is $COVERAGE_THRESHOLD: a coverage script is required"
             exit 1
           fi
-      - name: Install bats and kcov
+      - name: Install bats, shellcheck and the kcov build dependencies
         if: steps.script.outputs.present == 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bats kcov shellcheck file $APT_PACKAGES
+          sudo apt-get install -y -qq bats shellcheck file cmake binutils-dev \
+            libssl-dev libcurl4-openssl-dev libelf-dev libdw-dev libiberty-dev \
+            zlib1g-dev $APT_PACKAGES
+      - name: Restore kcov from the cache
+        if: steps.script.outputs.present == 'true'
+        id: kcov-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/kcov
+          key: kcov-${{ env.KCOV_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}
+      - name: Build kcov from the pinned release tarball
+        if: steps.script.outputs.present == 'true' && steps.kcov-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o kcov.tar.gz \
+            "https://github.com/SimonKagstrom/kcov/archive/refs/tags/v$KCOV_VERSION.tar.gz"
+          echo "$KCOV_SHA256  kcov.tar.gz" | sha256sum -c -
+          tar xzf kcov.tar.gz
+          cmake -S "kcov-$KCOV_VERSION" -B kcov-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/kcov"
+          cmake --build kcov-build --parallel "$(nproc)"
+          cmake --install kcov-build
+      - name: Put kcov on PATH
+        if: steps.script.outputs.present == 'true'
+        run: |
+          echo "$HOME/kcov/bin" >> "$GITHUB_PATH"
+          "$HOME/kcov/bin/kcov" --version
       - name: Static analysis (advisory)
         if: steps.script.outputs.present == 'true'
         run: |
