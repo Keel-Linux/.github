@@ -1,22 +1,52 @@
-# Reusable: build an appliance layer with bt-layer on the self-hosted LXC
-# runner, verify it, assemble it and boot it. Inactive until a runner with
-# the labels "self-hosted, keel-lxc" is registered: a job that targets a
-# label no runner carries stays queued and is cancelled after 24 hours.
-# A caller job named "tests" produces the status check "tests / build-and-boot".
+# Reusable: fetch an appliance's layers from the project mirror, verify
+# them, assemble the chain into a scratch rootfs, boot that rootfs in an
+# LXC container and run the appliance repository's own tests/boot-test.sh
+# against it. Nothing here builds a layer.
+#
+# Why it fetches instead of building: the self-hosted runner keel-lxc-1
+# lives on the public services VM (docs/releases-host.md of the keel
+# repository), which has lxc, kcov, bats, zstd and python3-yaml but no
+# fab, deck or buildtasks and no /turnkey trees. The build host builds and
+# publishes the layers, this runner consumes them over IPv6. A job that
+# called bt-layer here would fail on the first line.
+#
+# keel comes from a checkout of keel-linux/keel at main, not from a
+# package: decision 0005 is still open, nothing is signed, and
+# archive.keellinux.org serves a README, so there is no keel package to
+# install. The checkout needs only python3 and PyYAML, both already on the
+# runner, and the commit it resolved to is printed in the job summary.
+#
+# A layer that has never been published is not a failure: the job says so
+# with a notice and in the job summary, and succeeds, so a repository can
+# carry the gate from its first day.
+#
+# A caller job named "appliance" produces the status check
+# "appliance / build-and-boot".
 name: test-appliance
 
 on:
   workflow_call:
     inputs:
       appliance:
-        description: appliance name without the keel- prefix (core, lamp, wordpress)
+        description: appliance name without the keel- prefix (core, nodebb, lamp)
         required: true
         type: string
       parent:
-        description: parent layer name, empty for core
+        description: >-
+          Parent layer the recipe builds on, empty for a rootfs layer such as
+          core. It is not needed to fetch anything, because keel pull follows
+          the parent chain in the manifests itself. It is kept because it is
+          checked against the parent the published manifest records, so a
+          caller finds out when the mirror serves a layer built on something
+          other than what the repository says.
         required: false
         type: string
         default: ""
+      timeout:
+        description: minutes before the job is cancelled
+        required: false
+        type: number
+        default: 60
 
 permissions:
   contents: read
@@ -24,25 +54,132 @@ permissions:
 jobs:
   build-and-boot:
     runs-on: [self-hosted, keel-lxc]
-    timeout-minutes: 180
+    timeout-minutes: ${{ inputs.timeout }}
     env:
       APPLIANCE: ${{ inputs.appliance }}
       PARENT: ${{ inputs.parent }}
-      FAB_PATH: /turnkey/fab
-      RELEASE: debian/trixie
-      FAB_ARCH: amd64
+      SOURCE: https://mirror.keellinux.org/layers
+      # One container and one scratch tree per run and per attempt, so two
+      # runs never share a name, a rootfs or a layer cache.
+      NAME: keel-${{ inputs.appliance }}-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      SCRATCH: /var/tmp/keel-ci/keel-${{ inputs.appliance }}-ci-${{ github.run_id }}-${{ github.run_attempt }}
       TERM: dumb
     steps:
       - uses: actions/checkout@v4
-      - name: Build the layer
+
+      - name: Check out keel and put it on PATH
         run: |
-          if [ -n "$PARENT" ]; then
-            /turnkey/buildtasks/bt-layer "$APPLIANCE" --parent "$PARENT"
+          set -eu
+          rm -rf .keel
+          git clone --quiet --depth 1 https://github.com/keel-linux/keel.git .keel
+          mkdir -p .keel/bin
+          cat > .keel/bin/keel <<'WRAPPER'
+          #!/bin/sh
+          # keel from the checkout of keel-linux/keel next to this script.
+          PYTHONPATH=$(cd "$(dirname "$0")/.." && pwd)
+          export PYTHONPATH
+          exec python3 -m keel "$@"
+          WRAPPER
+          chmod +x .keel/bin/keel
+          echo "$GITHUB_WORKSPACE/.keel/bin" >> "$GITHUB_PATH"
+          echo "KEEL_COMMIT=$(git -C .keel rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Is the layer published?
+        id: layer
+        run: |
+          set -eu
+          manifest=$SCRATCH-manifest
+          mkdir -p "$(dirname "$manifest")"
+          if curl -6 -fsS -o "$manifest" "$SOURCE/$APPLIANCE.manifest"; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
           else
-            /turnkey/buildtasks/bt-layer "$APPLIANCE"
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            rm -f "$manifest"
+            echo "::notice::$SOURCE/$APPLIANCE.manifest is not on the mirror yet, so there is nothing to boot; the job passes and this is recorded in the summary"
+            {
+              echo "## Appliance test skipped"
+              echo
+              echo "The layer \`$APPLIANCE\` has never been published to \`$SOURCE/\`."
+              echo "Build it on the build host (\`bt-layer $APPLIANCE\`) and publish it"
+              echo "(docs/releases-host.md, publishing a layer); this job then boots it on"
+              echo "the next run. Nothing was built, assembled or booted."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
-      - name: Verify, assemble and boot
+
+      - name: Check the published parent against the caller
+        if: steps.layer.outputs.published == 'true'
         run: |
-          keel verify --layers-dir /mnt/builds/layers --non-interactive || test $? -eq 8
-          test -x tests/boot-test.sh || { echo "::error::tests/boot-test.sh is missing"; exit 1; }
-          tests/boot-test.sh "$APPLIANCE"
+          set -eu
+          published=$(awk '$1 == "parent" { print $2 }' "${{ steps.layer.outputs.manifest }}")
+          declared=${PARENT:-none}
+          echo "manifest says parent $published, the caller declares $declared"
+          if [ "$published" != "$declared" ]; then
+            echo "::error::the published $APPLIANCE layer was built on '$published', the caller declares '$declared'"
+            exit 1
+          fi
+
+      - name: Pull the layer chain from the mirror
+        if: steps.layer.outputs.published == 'true'
+        run: |
+          set -eu
+          mkdir -p "$SCRATCH/cache" "$SCRATCH/lxc"
+          keel pull "$APPLIANCE" --source "$SOURCE" --cache-dir "$SCRATCH/cache" --non-interactive
+
+      - name: Verify the layers
+        if: steps.layer.outputs.published == 'true'
+        run: |
+          set -eu
+          code=0
+          keel verify --layers-dir "$SCRATCH/cache" --non-interactive || code=$?
+          case "$code" in
+            0) echo "every layer matches its manifest" ;;
+            8) echo "::notice::keel verify exited 8: the layers match their manifests and carry a hash file that is not signed. Expected until the release key of decision 0005 exists" ;;
+            9) echo "keel verify exited 9: every layer matches; the package half of the check is not implemented yet" ;;
+            6) echo "::error::keel verify exited 6: a manifest is invalid"; exit 6 ;;
+            7) echo "::error::keel verify exited 7: a tarball, a parent chain or a digest does not match its manifest"; exit 7 ;;
+            *) echo "::error::keel verify exited $code"; exit "$code" ;;
+          esac
+
+      - name: Assemble and boot, then run the appliance's boot test
+        if: steps.layer.outputs.published == 'true'
+        run: |
+          set -eu
+          test -x tests/boot-test.sh || {
+            echo "::error::tests/boot-test.sh is missing or not executable in this repository"
+            exit 1
+          }
+          # Assembling a rootfs and starting a container need root. The
+          # runner user has no blanket sudo: keel-ci-boot-test is a
+          # root-owned entry point that checks its arguments and runs this
+          # repository's boot test with the keel checkout of this job first
+          # in PATH (docs/releases-host.md, the CI runner).
+          sudo -n /usr/local/sbin/keel-ci-boot-test \
+            "$GITHUB_WORKSPACE" "$SCRATCH" "$APPLIANCE" \
+            --name "$NAME" \
+            --layers-dir "$SOURCE" \
+            --cache-dir "$SCRATCH/cache" \
+            --lxc-path "$SCRATCH/lxc" \
+            --bridge lxcbr0 \
+            --timeout 900 --interval 5
+
+      - name: Summary
+        if: steps.layer.outputs.published == 'true'
+        run: |
+          {
+            echo "## Appliance test"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| appliance | \`$APPLIANCE\` |"
+            echo "| parent | \`${PARENT:-none}\` |"
+            echo "| source | \`$SOURCE\` |"
+            echo "| container | \`$NAME\` |"
+            echo "| keel | \`$KEEL_COMMIT\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Destroy the container and the scratch rootfs
+        if: always()
+        run: |
+          sudo -n /usr/local/sbin/keel-ci-cleanup "$NAME" "$SCRATCH" || true
+          rm -f "$SCRATCH-manifest"
