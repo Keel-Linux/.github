@@ -44,11 +44,30 @@ shipped_paths() {
 }
 
 # entry_version LINE: the version of a changelog entry line, empty when the
-# line is not one: "confconsole (2.2.3+keel2) trixie; urgency=low".
+# line is not one.
+#
+# Two conventions meet here. A Debian package carries its whole version in
+# the parentheses: "confconsole (2.2.3+keel2) trixie". A TurnKey appliance
+# recipe carries the distribution version in the source name and only the
+# appliance revision in the parentheses: "turnkey-lamp-19.0 (1) turnkey".
+# Reading the parentheses alone makes 18.1 (1) and 19.0 (1) equal, which
+# refused the LAMP and LAPP rebuilds on 2026-09-27 although the entry was new.
+#
+# So a trailing version in the source name, if there is one, is read as the
+# upstream part and joined to the revision: "turnkey-lamp-19.0 (1)" becomes
+# 19.0-1, which dpkg orders after 18.1-1, while a name with no version in it
+# keeps behaving exactly as before.
 entry_version() {
-    local line="$1"
-    [[ "$line" =~ ^[a-z0-9][a-z0-9.+-]*\ \(([^\)]+)\) ]] || return 1
-    printf '%s\n' "${BASH_REMATCH[1]}"
+    local line="$1" name rev upstream
+    [[ "$line" =~ ^([a-z0-9][a-z0-9.+-]*)\ \(([^\)]+)\) ]] || return 1
+    name="${BASH_REMATCH[1]}"
+    rev="${BASH_REMATCH[2]}"
+    if [[ "$name" =~ -([0-9]+(\.[0-9]+)*)$ ]]; then
+        upstream="${BASH_REMATCH[1]}"
+        printf '%s-%s\n' "$upstream" "$rev"
+        return 0
+    fi
+    printf '%s\n' "$rev"
 }
 
 # version_increased BEFORE AFTER: whether AFTER is greater, by dpkg's order.
