@@ -1,7 +1,11 @@
 #!/bin/bash
-# Runs the bats suite under kcov and fails when a measured file (bin/*) is
-# below the threshold: 95 percent of executed lines, the bar for
+# Runs the bats suite under kcov and fails when a measured file (bin/* and
+# lib/*) is below the threshold: 95 percent of executed lines, the bar for
 # project-authored code (decisions 0003 and 0004).
+#
+# lib/ is measured for the same reason bin/ is: it is shell this repository
+# lends to the repositories that call the reusable workflows, so it is
+# tested here rather than copied into each of them.
 #
 #   tests/coverage.sh [OUTDIR]     threshold from COVERAGE_THRESHOLD (default 95)
 #
@@ -20,7 +24,7 @@ for tool in bats kcov git dpkg; do
 done
 
 rm -rf "$OUTDIR"
-kcov --include-path="$REPO/bin" --exclude-path="$REPO/tests" \
+kcov --include-path="$REPO/bin,$REPO/lib" --exclude-path="$REPO/tests" \
     "$OUTDIR" bats "$REPO/tests"
 
 REPORT="$(find "$OUTDIR" -path '*/bats.*/coverage.json' | head -1)"

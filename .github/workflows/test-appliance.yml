@@ -1,7 +1,17 @@
 # Reusable: fetch an appliance's layers from the project mirror, verify
-# them, assemble the chain into a scratch rootfs, boot that rootfs in an
-# LXC container and run the appliance repository's own tests/boot-test.sh
-# against it. Nothing here builds a layer.
+# them, assemble the chain into one or more scratch rootfs trees, boot them
+# in LXC containers on one bridge and run the appliance repository's own
+# tests/boot-test.sh against them. Nothing here builds a layer.
+#
+# One container is the default and is unchanged. A repository that needs
+# several declares them with the `roles` input, one role name per node:
+# `roles: "primary replica"` for replication, `roles: "galera galera
+# galera"` for a three node cluster later. The number of nodes is the
+# number of names, so nothing in this workflow assumes two. How each node
+# learns which one it is, and how a test addresses another one, is
+# lib/boot-test-nodes.sh of this repository, which the job checks out and
+# hands to the boot test with --nodes-lib; that file is unit tested here
+# because this is the repository with a gate on it.
 #
 # Why it fetches instead of building: the self-hosted runner keel-lxc-1
 # lives on the public services VM (docs/releases-host.md of the keel
@@ -42,6 +52,18 @@ on:
         required: false
         type: string
         default: ""
+      roles:
+        description: >-
+          One role name per node, separated by spaces, when the repository's
+          boot test needs more than one container: "primary replica", or
+          "galera galera galera". Empty, the default, is one container and
+          exactly the single node behaviour every caller has today. The node
+          count is the number of names and nothing here assumes two. Role
+          names are lower case letters, digits and dashes; five nodes is the
+          ceiling, because this runner is shared.
+        required: false
+        type: string
+        default: ""
       timeout:
         description: minutes before the job is cancelled
         required: false
@@ -58,14 +80,39 @@ jobs:
     env:
       APPLIANCE: ${{ inputs.appliance }}
       PARENT: ${{ inputs.parent }}
+      ROLES: ${{ inputs.roles }}
       SOURCE: https://mirror.keellinux.org/layers
-      # One container and one scratch tree per run and per attempt, so two
-      # runs never share a name, a rootfs or a layer cache.
+      NODES_LIB: ${{ github.workspace }}/.keel-ci/lib/boot-test-nodes.sh
+      # One scratch tree per run and per attempt, so two runs never share a
+      # rootfs or a layer cache. NAME is the container name with one node
+      # and the base the node names are derived from with several, which is
+      # btn_node_name: NAME-1, NAME-2, NAME-3.
       NAME: keel-${{ inputs.appliance }}-ci-${{ github.run_id }}-${{ github.run_attempt }}
       SCRATCH: /var/tmp/keel-ci/keel-${{ inputs.appliance }}-ci-${{ github.run_id }}-${{ github.run_attempt }}
       TERM: dumb
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check out the gate's node library and check the declared roles
+        if: inputs.roles != ''
+        run: |
+          set -eu
+          # The library the boot test sources is this workflow's own, fetched
+          # the same way keel is below, and the commit is recorded in the job
+          # summary. It should be pinned to github.job_workflow_sha, the
+          # commit the reusable workflow itself is running from, so a caller
+          # pinned to a tag would get the library belonging to that tag;
+          # actionlint 1.7.7 does not know that property and this
+          # organization's lint gate fails on any finding, so it is main,
+          # which is the ref every caller uses (profile/WORKFLOWS.md).
+          rm -rf .keel-ci
+          git clone --quiet --depth 1 --branch main \
+            https://github.com/keel-linux/.github.git .keel-ci
+          echo "NODES_LIB_COMMIT=$(git -C .keel-ci rev-parse HEAD)" >> "$GITHUB_ENV"
+          # shellcheck source=/dev/null
+          . "$NODES_LIB"
+          echo "$(btn_node_count "$ROLES") nodes declared: $ROLES"
+          btn_nodes "$NAME" "$ROLES"
 
       - name: Check out keel and put it on PATH
         run: |
@@ -175,6 +222,16 @@ jobs:
             echo "::error::tests/boot-test.sh is missing or not executable in this repository"
             exit 1
           }
+          # With several nodes the boot test is given the role list, the
+          # library that turns it into container names, and a path to write
+          # the topology it ended up with, which the summary step renders.
+          # With one node none of this is passed, so a repository that has
+          # never heard of --roles is called exactly as before.
+          nodes=()
+          if [ -n "$ROLES" ]; then
+            nodes=(--roles "$ROLES" --nodes-lib "$NODES_LIB"
+                   --nodes-report "$SCRATCH/nodes")
+          fi
           # Assembling a rootfs and starting a container need root. The
           # runner user has no blanket sudo: keel-ci-boot-test is a
           # root-owned entry point that checks its arguments and runs this
@@ -187,7 +244,8 @@ jobs:
             --cache-dir "$SCRATCH/cache" \
             --lxc-path "$SCRATCH/lxc" \
             --bridge lxcbr0 \
-            --timeout 900 --interval 5
+            --timeout 900 --interval 5 \
+            "${nodes[@]+"${nodes[@]}"}"
 
       - name: Summary
         if: steps.layer.outputs.published == 'true'
@@ -200,12 +258,65 @@ jobs:
             echo "| appliance | \`$APPLIANCE\` |"
             echo "| parent | \`${PARENT:-none}\` |"
             echo "| source | \`$SOURCE\` |"
+            echo "| nodes | \`${ROLES:-one}\` |"
             echo "| container | \`$NAME\` |"
             echo "| keel | \`$KEEL_COMMIT\` |"
+            if [ -n "$ROLES" ]; then
+              echo "| node library | \`$NODES_LIB_COMMIT\` |"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
+          # The topology comes from the boot test, which is the only thing
+          # that knows the addresses the bridge handed out, and is rendered
+          # by the same library the test built it with.
+          if [ -n "$ROLES" ] && [ -r "$SCRATCH/nodes" ]; then
+            # shellcheck source=/dev/null
+            . "$NODES_LIB"
+            {
+              echo
+              echo "| Node | Role | Container | Address |"
+              echo "| --- | --- | --- | --- |"
+              btn_summary_rows "$(cat "$SCRATCH/nodes")"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-      - name: Destroy the container and the scratch rootfs
+      - name: Destroy every container and the scratch rootfs
         if: always()
         run: |
+          set -u
+          # Whatever the outcome, including a cancelled run, which reaches
+          # this step because the condition is always(). Two containers left
+          # on a shared build host cost somebody else a debugging session.
+          #
+          # The containers are enumerated from LXC rather than recomputed
+          # from the role list, so a node the test added, renamed or started
+          # before it failed is torn down too, and so this step needs no
+          # agreement with the test about how many there were. Stopping comes
+          # first and removing the tree last: keel-ci-cleanup does both in
+          # one call, and calling it per node would delete the tree holding
+          # the configuration of the nodes not stopped yet, leaving their
+          # init processes running on a rootfs that no longer exists. Both
+          # lxc-stop and lxc-destroy are in the runner's sudo policy
+          # already, so nothing here needs it widened.
+          if [ -d "$SCRATCH/lxc" ]; then
+            for container in $(sudo -n /usr/bin/lxc-ls -P "$SCRATCH/lxc" -1 2>/dev/null || true); do
+              echo "stopping and destroying $container"
+              sudo -n /usr/bin/lxc-stop -P "$SCRATCH/lxc" -n "$container" -k >/dev/null 2>&1 || true
+              sudo -n /usr/bin/lxc-destroy -P "$SCRATCH/lxc" -n "$container" -f >/dev/null 2>&1 || true
+            done
+          fi
+          # Removes the scratch tree: the layer cache, every rootfs and the
+          # topology report. Safe to run twice, which is what it is for.
           sudo -n /usr/local/sbin/keel-ci-cleanup "$NAME" "$SCRATCH" || true
           rm -f "$SCRATCH-manifest"
+          if [ -e "$SCRATCH" ]; then
+            echo "::warning::$SCRATCH still exists after cleanup"
+          fi
+          # lxc-ls reads the lxcpath, which is gone by now, so it would say
+          # nothing either way. The monitor process of a container that
+          # survived still carries the path in its command line, and that is
+          # the thing worth reporting: it is what a later run would trip on.
+          left=$(pgrep -af 'lxc monitor' 2>/dev/null | grep -c "$SCRATCH" || true)
+          echo "monitor processes of this run still alive: $left"
+          if [ "$left" != 0 ]; then
+            echo "::warning::$left container monitor(s) of this run survived cleanup"
+          fi
