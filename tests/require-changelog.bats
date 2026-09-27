@@ -158,3 +158,48 @@ script() {
     [ "$status" -eq 3 ]
     [[ "$output" == *"not a git repository"* ]]
 }
+
+@test "a version in the source name is read as the upstream part" {
+    printf 'thing-18.1 (1) turnkey; urgency=low\n\n  * old\n' > debian/changelog
+    printf 'code\n' > thing.py
+    commit "the 18.1 state"
+    base_18="$HEAD_SHA"
+    printf 'thing-19.0 (1) turnkey; urgency=low\n\n  * rebuilt on the new base\n\nthing-18.1 (1) turnkey; urgency=low\n\n  * old\n' > debian/changelog
+    printf 'changed\n' > thing.py
+    commit "the 19.0 rebuild"
+
+    script "$base_18" "$HEAD_SHA"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"18.1-1 to 19.0-1"* ]]
+}
+
+@test "a revision that goes backwards is still refused when the name carries the version" {
+    printf 'thing-19.0 (2) turnkey; urgency=low\n\n  * two\n' > debian/changelog
+    printf 'code\n' > thing.py
+    commit "revision two"
+    base_two="$HEAD_SHA"
+    printf 'thing-19.0 (1) turnkey; urgency=low\n\n  * back to one\n' > debian/changelog
+    printf 'changed\n' > thing.py
+    commit "revision one again"
+
+    script "$base_two" "$HEAD_SHA"
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"not greater"* ]]
+}
+
+@test "a name with no version in it keeps the Debian reading" {
+    printf 'thing (1.0) trixie; urgency=low\n\n  * one\n' > debian/changelog
+    printf 'code\n' > thing.py
+    commit "plain debian"
+    base_plain="$HEAD_SHA"
+    printf 'thing (1.1) trixie; urgency=low\n\n  * two\n\nthing (1.0) trixie; urgency=low\n\n  * one\n' > debian/changelog
+    printf 'changed\n' > thing.py
+    commit "plain debian bumped"
+
+    script "$base_plain" "$HEAD_SHA"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1.0 to 1.1"* ]]
+}
