@@ -75,7 +75,8 @@ image did not have it.
   comes from a checkout of `keel-linux/keel` at `main`, because nothing is
   packaged or signed yet (decision 0005). Inputs: `appliance`, `parent`
   (checked against the parent the published manifest records, not used to
-  fetch), `timeout` (minutes, default 60). When the layer has never been
+  fetch), `roles` (see below, default empty, which is one container),
+  `timeout` (minutes, default 60). When the layer has never been
   published, meaning its manifest answers 404, the job passes with a notice
   and says so in the job summary, so a repository can carry the gate before
   its first layer exists. Any other answer, including a name that does not
@@ -150,6 +151,71 @@ jobs:
     if: vars.KEEL_LXC_RUNNER == 'true'
     uses: keel-linux/.github/.github/workflows/build-deb.yml@main
 ```
+
+## Several nodes in the appliance gate
+
+Replication cannot be proved on one machine, so `test-appliance.yml` boots as
+many containers as the caller declares. One input carries it:
+
+```yaml
+  appliance:
+    if: vars.KEEL_LXC_RUNNER == 'true'
+    uses: keel-linux/.github/.github/workflows/test-appliance.yml@main
+    with:
+      appliance: mariadb
+      parent: core
+      roles: primary replica
+```
+
+`roles` is one role name per node, separated by spaces. The node count is the
+number of names, so `galera galera galera` is three and nothing in the
+workflow assumes two; repeats are allowed because Galera nodes share a role,
+and five nodes is the ceiling because this runner is shared. Empty, the
+default, is one container and exactly what every caller does today: no new
+step runs and the boot test is called with the arguments it was called with
+before.
+
+Three things had to be decided, and all three keep the shape a single node
+boot test already has:
+
+- **How a repository declares it.** The `roles` input, beside `appliance` and
+  `parent`, in the caller's own short workflow. It is the same kind of thing
+  an appliance author already writes there, and it is one line.
+- **How a node learns which one it is.** Container names are derived from the
+  run's name, `NAME-1`, `NAME-2`, and the boot test writes
+  `/etc/keel/node.env` into each rootfs before starting it:
+  `KEEL_NODE_NAME`, `KEEL_NODE_ROLE`, `KEEL_NODE_INDEX`, `KEEL_NODE_COUNT`. A
+  node reads a file in its own filesystem, which is how every other appliance
+  setting arrives, and not its hostname or the order it was started in. Once
+  every node has an address the test writes `/etc/keel/peers.env` into all of
+  them, with `KEEL_NODE_<i>_ADDR` for every node and `KEEL_PEER_<ROLE>` for a
+  role exactly one node holds. Those two files are the seam the appliance's
+  own replication feature takes over when the instance description carries
+  the role (handbook decision 0013).
+- **How the test addresses another node.** By literal IPv6 address, never by
+  name: on Debian `localhost` resolves to IPv4 alone, so a name in this path
+  would quietly pick the wrong family. `btn_role_node` names the container
+  holding a role, `btn_tcp_probe_argv` builds the bash `/dev/tcp` connect one
+  container runs against another's literal address, and the appliance's own
+  `bt_wait_for` turns it into a wait with a deadline.
+
+The logic is `lib/boot-test-nodes.sh` of this repository, unit tested in
+`tests/boot-test-nodes.bats` and measured by `tests/coverage.sh`, because it
+is shell this repository lends to others and this is the repository with a
+gate on it. The job clones it, hands it to the boot test with `--nodes-lib`
+and records the commit it used in the job summary. An appliance boot test
+that wants several nodes therefore accepts `--roles`, `--nodes-lib` and
+`--nodes-report`; nothing else about it changes.
+
+Teardown runs whatever the outcome, cancellation included, because the step's
+condition is `always()`. It enumerates the containers from LXC rather than
+recomputing them from the role list, so a node the test renamed or started
+just before failing goes too. It stops all of them first and removes the
+scratch tree last: `keel-ci-cleanup` stops one container and deletes the tree
+in a single call, so calling it once per node would delete the configuration
+of the nodes not stopped yet and leave their init processes running on a
+rootfs that no longer exists. `lxc-stop` and `lxc-destroy` are already in the
+runner's sudo policy, so several nodes need it no wider than one node did.
 
 ## The site (keel-linux.github.io)
 
