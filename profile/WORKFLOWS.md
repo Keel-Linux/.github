@@ -15,11 +15,15 @@ GitHub names the check after the caller's job id and the reusable job id:
 | --- | --- | --- |
 | `test-python.yml` | `coverage` | `tests / coverage` |
 | `test-shell.yml` | `coverage` | `tests / coverage` |
-| `test-appliance.yml` | `build-and-boot` | `appliance / build-and-boot` (caller job id `appliance`) |
+| `test-appliance.yml` | `boot-published-layer` | `appliance / boot-published-layer` (caller job id `appliance`) |
 | `build-deb.yml` | `deb` | `package / deb` (caller job id `package`) |
 
 Renaming a caller job renames the check and breaks the protection rule that
-requires it, so keep the job id `tests`.
+requires it, so keep the job id `tests`. Renaming a reusable job does the
+same thing to every caller at once: `build-and-boot` became
+`boot-published-layer` on 2026-09-28, and the protection rule of each
+appliance repository had to be renamed with it or the gate would have stopped
+applying without saying so.
 
 ## This repository's own gate
 
@@ -50,6 +54,65 @@ confconsole stayed at the previous version and neither change reached an
 appliance: the code was on the default branch, the gate was green, and the
 image did not have it.
 
+## What the appliance gate proves
+
+`test-appliance.yml` boots the layer the mirror **publishes**. That is worth
+having: it catches a published layer that no longer boots, and it catches a
+layer whose recorded parent is not the one the repository declares. It is not
+evidence about a branch. On a pull request that changes the recipe, the layer
+on the mirror is the one built from the default branch, so the change is never
+exercised: the job pulls code that is already merged, boots it, goes green and
+proves nothing about the diff. Building from the branch instead would need the
+build host, which is serialised behind a lock, so it does not fit a
+per-pull-request check and this workflow does not attempt it.
+
+The job id is therefore `boot-published-layer` and not `build-and-boot`. The
+old name read like "this branch was built and booted", and on 2026-09-28 that
+is how it was read when branch protection was applied to keel-lamp, keel-lapp
+and keel-apache-php. A check may only be named for what it proves. The job
+summary repeats it in as many words, with the `product_commit` and pool date
+the booted layer was built from, so a reviewer can see how old the thing that
+booted is.
+
+### A layer that has never been published
+
+The job fails. Until 2026-09-28 it passed with a `::notice::` and a job
+summary saying "Nothing was built, assembled or booted", which is honest
+prose attached to a dishonest conclusion: branch protection and
+`gh pr checks` read the conclusion. keel-redis#5 carried a green
+`appliance / build-and-boot` produced in 11 seconds by a job that pulled,
+verified and booted nothing, and looked ready to merge.
+
+GitHub leaves no third answer to reach for. A job skipped by `if:` reports
+success and does not block a merge, and `exit 78`, the old neutral
+conclusion, is a plain failure now (measured on this repository, run
+36372853847). Failure is the only conclusion a workflow job can produce that
+withholds a merge, so that is what an unpublished layer gets.
+
+A repository whose first layer genuinely does not exist yet declares it:
+
+```yaml
+  appliance:
+    if: vars.KEEL_LXC_RUNNER == 'true'
+    uses: keel-linux/.github/.github/workflows/test-appliance.yml@main
+    with:
+      appliance: somethingnew
+      parent: core
+      allow_unpublished: true
+```
+
+The exemption then lives in that repository's own workflow file, where
+whoever reviews it sees it, rather than in the shared gate where nobody
+does. It dies on its own: once the manifest answers 200, `allow_unpublished`
+is an error telling you to remove the line, so it cannot outlive the
+bootstrap it was granted for.
+
+The decision taken from the mirror's answer is `bin/appliance-gate` of this
+repository, which the job checks out and runs, so the honesty of the gate is
+a tested script rather than shell inside a workflow (decision 0004). It is
+unit tested in `tests/appliance-gate.bats` and measured by
+`tests/coverage.sh` with everything else here.
+
 ## The workflows
 
 - `test-python.yml`: pytest under coverage.py, branch coverage,
@@ -64,7 +127,7 @@ image did not have it.
   Bootstrap rule: if the script is absent and the threshold is 0 the job
   passes with a notice (nothing is measured yet); if the script is absent and
   the threshold is above 0 the job fails. shellcheck runs first, advisory.
-- `test-appliance.yml`: fetches the appliance's layers from
+- `test-appliance.yml`: fetches the appliance's **published** layers from
   `https://mirror.keellinux.org/layers` over IPv6 on the self-hosted LXC
   runner (labels `self-hosted, keel-lxc`), verifies them, assembles the chain
   into a scratch rootfs, boots it in an LXC container named after the run and
@@ -76,12 +139,11 @@ image did not have it.
   packaged or signed yet (decision 0005). Inputs: `appliance`, `parent`
   (checked against the parent the published manifest records, not used to
   fetch), `roles` (see below, default empty, which is one container),
-  `timeout` (minutes, default 60). When the layer has never been
-  published, meaning its manifest answers 404, the job passes with a notice
-  and says so in the job summary, so a repository can carry the gate before
-  its first layer exists. Any other answer, including a name that does not
-  resolve, fails the job: skipping on an outage would be a green check that
-  tested nothing.
+  `allow_unpublished` (see below, default `false`), `timeout` (minutes,
+  default 60). Read [what it proves](#what-the-appliance-gate-proves) before
+  requiring it for merge. An answer that is neither 200 nor 404, including a
+  name that does not resolve, fails the job: reading an outage as "not
+  published" would be a green check that tested nothing.
 - `build-deb.yml`: `dpkg-buildpackage -us -uc -b` on the self-hosted LXC
   runner, the `.deb` uploaded as a workflow artifact (input `artifact-name`,
   default `deb`; `source-dir`; `retention-days`). Inactive until the runner
