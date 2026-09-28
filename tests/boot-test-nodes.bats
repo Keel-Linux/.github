@@ -3,6 +3,8 @@
 # gate lends to every appliance repository. No container, no network, no
 # root: every function here is logic, which is why it can be measured.
 
+bats_require_minimum_version 1.5.0
+
 setup() {
     LIB="$BATS_TEST_DIRNAME/../lib/boot-test-nodes.sh"
     # shellcheck source=../lib/boot-test-nodes.sh
@@ -17,19 +19,19 @@ setup() {
 }
 
 @test "refuses a role name with upper case, an underscore or a dot" {
-    ! btn_is_role_name Primary
-    ! btn_is_role_name data_node
-    ! btn_is_role_name node.one
-    ! btn_is_role_name 1node
-    ! btn_is_role_name ""
+    run ! btn_is_role_name Primary
+    run ! btn_is_role_name data_node
+    run ! btn_is_role_name node.one
+    run ! btn_is_role_name 1node
+    run ! btn_is_role_name ""
 }
 
 @test "accepts a container name base and refuses one LXC would not take" {
     btn_is_node_base keel-mariadb-ci-36301670829-1
     btn_is_node_base node.example
-    ! btn_is_node_base Keel
-    ! btn_is_node_base -leading-dash
-    ! btn_is_node_base ""
+    run ! btn_is_node_base Keel
+    run ! btn_is_node_base -leading-dash
+    run ! btn_is_node_base ""
 }
 
 # --- the declared list ------------------------------------------------
@@ -243,10 +245,10 @@ setup() {
 @test "an IPv6 literal is a literal, and a name or an IPv4 address is not" {
     btn_is_ipv6_literal fc42:5009:ba4b:5ab0::2
     btn_is_ipv6_literal ::1
-    ! btn_is_ipv6_literal localhost
-    ! btn_is_ipv6_literal 127.0.0.1
-    ! btn_is_ipv6_literal "fc42::1/64"
-    ! btn_is_ipv6_literal ""
+    run ! btn_is_ipv6_literal localhost
+    run ! btn_is_ipv6_literal 127.0.0.1
+    run ! btn_is_ipv6_literal "fc42::1/64"
+    run ! btn_is_ipv6_literal ""
 }
 
 @test "the probe is a bash TCP connect to a literal address, unbracketed" {

@@ -6,6 +6,11 @@
 # threshold is 0 (nothing measured on this branch), the job succeeds with a
 # notice so the check exists and protection can require it. A missing script
 # with a threshold above 0 is a failure.
+#
+# The job also refuses a bats suite that contains an inert negation (SC2314),
+# whether or not it has a coverage script, because such a test asserts
+# nothing and measuring it would report coverage of an assertion that never
+# runs.
 name: test-shell
 
 on:
@@ -44,6 +49,43 @@ jobs:
       KCOV_SHA256: 4cbba86af11f72de0c7514e09d59c7927ed25df7cebdad087f6d3623213b95bf
     steps:
       - uses: actions/checkout@v4
+      # A bats negation only asserts when it is the last command of the test
+      # body: bash does not apply errexit to a negated command, so every
+      # earlier `! cmd` is inert and its test passes whatever the code does.
+      # shellcheck grades the two cases apart, error for the inert ones and
+      # note for the rest, so --severity=error reports exactly the dead
+      # assertions. It runs before the coverage job's own work because it
+      # needs nothing but a checkout, and a suite that is not asserting is
+      # not worth measuring. Measured on 2026-09-28 over every default branch
+      # in the organization that carries a bats file: 57 dead assertions in
+      # eight repositories, twelve of them all but one of an IPv6 validator's
+      # rejection cases.
+      - name: Negations that assert (SC2314)
+        run: |
+          command -v shellcheck >/dev/null 2>&1 || {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+          }
+          set -o pipefail
+          status=0
+          git ls-files -z '*.bats' \
+            | xargs -0 -r shellcheck -f gcc --shell=bash \
+                --severity=error --include=SC2314 \
+            | tee sc2314.txt || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::a bats negation that is not the last command of its test asserts nothing; write it 'run ! cmd' (needs bats_require_minimum_version 1.5.0)"
+          fi
+          {
+            echo "## Negations that assert (SC2314)"
+            echo '```'
+            if [ -s sc2314.txt ]; then
+              cat sc2314.txt
+            else
+              echo "no inert negations in $(git ls-files '*.bats' | wc -l) bats files"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
       - name: Check for the coverage script
         id: script
         run: |

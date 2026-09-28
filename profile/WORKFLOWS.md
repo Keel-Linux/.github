@@ -63,7 +63,14 @@ image did not have it.
   argument is passed. Inputs: `threshold`, `coverage-script`, `apt-packages`.
   Bootstrap rule: if the script is absent and the threshold is 0 the job
   passes with a notice (nothing is measured yet); if the script is absent and
-  the threshold is above 0 the job fails. shellcheck runs first, advisory.
+  the threshold is above 0 the job fails. shellcheck runs first, advisory,
+  except for one check that blocks: SC2314, a bats negation that is not the
+  last command of its test body. Such a `! cmd` asserts nothing, because bash
+  does not apply errexit to a negated command, so the test passes whatever
+  the code does. Write it `run ! cmd` and declare
+  `bats_require_minimum_version 1.5.0`. This one runs before the coverage
+  work and without a coverage script, since a suite that is not asserting is
+  not worth measuring.
 - `test-appliance.yml`: fetches the appliance's layers from
   `https://mirror.keellinux.org/layers` over IPv6 on the self-hosted LXC
   runner (labels `self-hosted, keel-lxc`), verifies them, assembles the chain
