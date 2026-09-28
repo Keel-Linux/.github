@@ -18,12 +18,25 @@ GitHub names the check after the caller's job id and the reusable job id:
 | `test-appliance.yml` | `boot-published-layer` | `appliance / boot-published-layer` (caller job id `appliance`) |
 | `build-deb.yml` | `deb` | `package / deb` (caller job id `package`) |
 
-Renaming a caller job renames the check and breaks the protection rule that
-requires it, so keep the job id `tests`. Renaming a reusable job does the
-same thing to every caller at once: `build-and-boot` became
-`boot-published-layer` on 2026-09-28, and the protection rule of each
-appliance repository had to be renamed with it or the gate would have stopped
-applying without saying so.
+Renaming a caller job renames the check, so keep the job id `tests`. Renaming
+a reusable job renames it for every caller at once: `build-and-boot` became
+`boot-published-layer` on 2026-09-28.
+
+What happens when the protection rule is not renamed with it is worth being
+exact about, because the intuition runs the wrong way. GitHub **fails
+closed**. A required context that is never reported does not quietly stop
+applying; the pull request stays blocked, waiting for a status that will
+never arrive. Measured in this organization on 2026-09-28: two pull requests
+in keel-mariadb under the same rule, every reported check green on both.
+Number 16, reporting `appliance / build-and-boot`, was `clean`. Number 17,
+reporting `appliance / boot-published-layer` and identical otherwise, was
+`blocked`. keel-core#10 the same; keel-redis#6, in the one repository that
+does not require the context, `clean`.
+
+So the cost of renaming a reusable job without renaming the rules is a
+lockout of every repository that requires the old name, not an open gate, and
+where `enforce_admins` is on (keel-core and keel-mariadb) an owner cannot
+merge past it either. Rename the rules in the same change.
 
 ## This repository's own gate
 
@@ -103,9 +116,54 @@ A repository whose first layer genuinely does not exist yet declares it:
 
 The exemption then lives in that repository's own workflow file, where
 whoever reviews it sees it, rather than in the shared gate where nobody
-does. It dies on its own: once the manifest answers 200, `allow_unpublished`
-is an error telling you to remove the line, so it cannot outlive the
-bootstrap it was granted for.
+does. The run carries a `::warning::` annotation saying nothing was booted,
+and once the manifest answers 200 the input becomes an error telling you to
+remove the line.
+
+Two ways that expiry does not happen on its own, both printed in the summary
+of any run that uses the exemption, because an exemption whose limits are not
+written down is the next unearned green:
+
+- The expiry is an error **on this check**. It stops somebody only where the
+  check is a required status. In keel-nodejs-nginx there is no protection at
+  all and in keel-redis this check is not required, and those are exactly the
+  repositories an exemption would sit in, because the exemption is for
+  repositories that have not published.
+- The expiry keys on the name in `appliance:`. `appliance: wordpres` answers
+  404 for ever, so an exemption behind a typo never expires and the job stays
+  green having booted nothing. Without the exemption the typo fails loudly on
+  the first run, which is the default for that reason.
+
+### Checking a change to this workflow before it merges
+
+Nothing does it automatically. `tests / coverage` runs `bin/appliance-gate`
+on its own under bats, and no job runs it in place: the tooling checkout is
+`ref: ${{ inputs.tooling_ref }}`, default `main`, so a pull request here runs
+a new workflow against **main's** copy of the script. It should be
+`github.job_workflow_sha`, which needs no input and no procedure; actionlint
+1.7.7 does not know that property and the lint gate fails on any finding.
+
+Until then the check is manual, and this is it:
+
+1. Push the branch of `keel-linux/.github`.
+2. In an appliance repository, on a throwaway branch, point the caller at it
+   and add the matching `tooling_ref`:
+
+   ```yaml
+     appliance:
+       uses: keel-linux/.github/.github/workflows/test-appliance.yml@my-branch
+       with:
+         appliance: core
+         parent: ""
+         tooling_ref: my-branch
+   ```
+
+3. Open a pull request, read the job, close it and delete the branch.
+
+Pick the repository for the state being checked: keel-core for a published
+single node layer, keel-mariadb for the two node path, a repository whose
+layer is 404 for the unpublished paths. Record the run ids in the pull
+request, because that is the only evidence anyone gets.
 
 The decision taken from the mirror's answer is `bin/appliance-gate` of this
 repository, which the job checks out and runs, so the honesty of the gate is
@@ -139,7 +197,8 @@ unit tested in `tests/appliance-gate.bats` and measured by
   packaged or signed yet (decision 0005). Inputs: `appliance`, `parent`
   (checked against the parent the published manifest records, not used to
   fetch), `roles` (see below, default empty, which is one container),
-  `allow_unpublished` (see below, default `false`), `timeout` (minutes,
+  `allow_unpublished` (see below, default `false`), `tooling_ref` (see below,
+  default `main`, and no ordinary caller sets it), `timeout` (minutes,
   default 60). Read [what it proves](#what-the-appliance-gate-proves) before
   requiring it for merge. An answer that is neither 200 nor 404, including a
   name that does not resolve, fails the job: reading an outage as "not

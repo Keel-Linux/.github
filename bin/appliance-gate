@@ -17,6 +17,7 @@
 #   2  200, exemption declared: the exemption outlived its reason
 #   3  any other answer: the mirror is neither saying yes nor saying no
 #   4  the arguments are not usable
+#   5  the decision could not be written down, so none may be acted on
 #
 # Why this exists. Until 2026-09-28 the gate answered 404 with a notice,
 # a job summary and the conclusion "success", and branch protection reads
@@ -33,9 +34,18 @@ set -uo pipefail
 
 # The decision the calling step reads back: whether there is a published
 # layer for the rest of the job to pull, verify, assemble and boot.
+#
+# A write that fails here is fatal, and that is the whole reason this
+# function exists rather than an inline redirection. Every boot step is
+# guarded by published == 'true', so a swallowed write leaves the output
+# empty, skips all six of them and concludes success: the defect this
+# script was written to remove, reached through an I/O error instead of
+# by design. GITHUB_OUTPUT lives on the runner that assembles multi
+# gigabyte rootfs trees, so ENOSPC is the way it happens.
 publish_decision() {
     if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-        printf 'published=%s\n' "$1" >> "$GITHUB_OUTPUT"
+        printf 'published=%s\n' "$1" >> "$GITHUB_OUTPUT" ||
+            die 5 "cannot record the decision in $GITHUB_OUTPUT; without it every boot step is skipped and the job would pass having booted nothing"
     fi
 }
 
@@ -55,13 +65,17 @@ die() {
     exit "$1"
 }
 
-# 200 and no exemption: the ordinary run. The wording says which layer
-# was booted, because it is the published one and not this branch.
+# 200 and no exemption: the ordinary run. The wording reports what this
+# step found and hands the rest of the job the decision. It does not
+# promise a boot, because this step is not the one that boots: whether
+# the layer pulls, verifies, assembles and comes up is the conclusion of
+# the steps after it, and a line here claiming otherwise would be the
+# same kind of unearned statement the rest of this change removes.
 boot() {
     local appliance=$1 manifest=$2
     publish_decision true
-    echo "appliance-gate: $manifest answers 200; the published $appliance layer will be pulled, verified, assembled and booted"
-    echo "appliance-gate: that layer was built and published before this run, so it is not evidence about this branch"
+    echo "appliance-gate: $manifest answers 200, so the $appliance layer is published and this job has something to boot"
+    echo "appliance-gate: it was built and published before this run, so whatever the boot proves, it is not evidence about this branch"
     return 0
 }
 
@@ -91,11 +105,16 @@ never_published() {
     return 1
 }
 
-# 404 and the exemption: the bootstrap case, declared out loud.
+# 404 and the exemption: the bootstrap case, declared out loud. It is a
+# warning and not a notice, so the run carries an annotation a reader
+# sees without opening the summary. This is the one path that concludes
+# success having booted nothing, so it is the one that has to say the
+# most about how little it proves, and about the two ways it can fail to
+# expire.
 exempt() {
     local appliance=$1 manifest=$2
     publish_decision false
-    echo "::notice::$manifest answers 404 and this caller declares allow_unpublished, so nothing is built, assembled or booted; remove that input once the $appliance layer is published"
+    echo "::warning::$manifest answers 404 and this caller declares allow_unpublished, so nothing is built, assembled or booted; remove that input once the $appliance layer is published"
     {
         echo "## Nothing was booted"
         echo
@@ -106,8 +125,18 @@ exempt() {
         echo
         echo "Publish the layer (\`bt-layer $appliance\`, then"
         echo "docs/releases-host.md) and remove \`allow_unpublished\` from the"
-        echo "caller. Leaving it in place is an error once the layer exists, so"
-        echo "the exemption cannot quietly outlive the bootstrap."
+        echo "caller. Leaving it in place is an error once the layer exists."
+        echo
+        echo "Two ways that expiry does not happen on its own, so somebody has"
+        echo "to look:"
+        echo
+        echo "1. The expiry is an error on this check. Where this check is not"
+        echo "   a required status, that error blocks no merge, and this is the"
+        echo "   population most likely to hold an exemption."
+        echo "2. The expiry keys on the name declared here. A typo in"
+        echo "   \`appliance:\` answers 404 for ever, so the exemption never"
+        echo "   expires and this job stays green having booted nothing. Check"
+        echo "   that \`$appliance\` is the name the build host publishes."
     } | summary
     return 0
 }

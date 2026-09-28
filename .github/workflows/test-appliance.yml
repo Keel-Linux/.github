@@ -101,11 +101,32 @@ on:
           whose first layer does not exist yet sets this to true to say so
           out loud, in its own workflow file, where whoever reviews that
           repository sees it. The exemption dies on its own: once the
-          manifest answers 200 this input is an error, so it cannot quietly
-          outlive the bootstrap it was granted for.
+          manifest answers 200 this input is an error. Two ways that expiry
+          does not happen on its own, both printed in the job summary of a
+          run that uses it: the error only stops somebody where this check
+          is a required status, and it keys on the name declared in
+          `appliance`, so a typo there answers 404 for ever and the
+          exemption never expires.
         required: false
         type: boolean
         default: false
+      tooling_ref:
+        description: >-
+          Ref of keel-linux/.github this job takes bin/appliance-gate and
+          lib/boot-test-nodes.sh from. The default, main, is what every
+          caller uses and the only value any of them should set. It is an
+          input because nothing else checks a change to this workflow before
+          it merges: tests/coverage.sh exercises the script on its own and
+          no job exercises it in place, so a pull request here would
+          otherwise run a new workflow against main's copy of the script. A
+          temporary caller pointed at a branch of keel-linux/.github sets
+          this to that same branch, and the job then runs the workflow and
+          the tooling from one commit. It should be github.job_workflow_sha
+          and no input at all; actionlint 1.7.7 does not know that property
+          and this organization's lint gate fails on any finding.
+        required: false
+        type: string
+        default: main
       timeout:
         description: minutes before the job is cancelled
         required: false
@@ -143,14 +164,23 @@ jobs:
       # github.job_workflow_sha, the commit this reusable workflow is
       # running from, so a caller pinned to a tag would get the tooling
       # belonging to that tag; actionlint 1.7.7 does not know that property
-      # and this organization's lint gate fails on any finding, so it is
-      # main, which is the ref every caller uses (profile/WORKFLOWS.md). The
-      # commit it resolved to is recorded in the job summary.
+      # and this organization's lint gate fails on any finding, so it
+      # defaults to main, which is the ref every caller uses
+      # (profile/WORKFLOWS.md).
+      #
+      # The consequence, until that property can be used: a pull request
+      # against keel-linux/.github that changes bin/appliance-gate or the
+      # wiring below runs against main's copy of it, so nothing here checks
+      # the change. The manual procedure in profile/WORKFLOWS.md, a
+      # temporary caller setting tooling_ref to the branch, is the only
+      # check there is, and it has to be done by hand. The commit this
+      # resolved to is recorded in the job summary, so a run says which
+      # tooling it used.
       - name: Check out the gate's own tooling
         uses: actions/checkout@v4
         with:
           repository: keel-linux/.github
-          ref: main
+          ref: ${{ inputs.tooling_ref }}
           path: .keel-ci
 
       - name: Record the tooling commit
@@ -196,9 +226,22 @@ jobs:
           # GITHUB_OUTPUT, writes the job summary for whatever it decided,
           # and exits non-zero on every state this job must not pass: a
           # layer that was never published and not declared as such, a
-          # declared exemption that has outlived the layer it excused, and
-          # any answer that is neither 200 nor 404.
+          # declared exemption that has outlived the layer it excused, any
+          # answer that is neither 200 nor 404, and a decision it could not
+          # write down.
           "$GATE" "$status" "$APPLIANCE" "$SOURCE" "$ALLOW_UNPUBLISHED"
+          # Every boot step below is guarded by published == 'true', so a
+          # decision that did not reach GITHUB_OUTPUT would skip all of them
+          # and leave this job green having booted nothing, which is the
+          # defect the gate exists to remove. The script makes that write
+          # fatal; this reads the file back so that the guard those steps
+          # depend on is checked here rather than assumed.
+          decided=$(awk -F= '$1 == "published" { print $2 }' "$GITHUB_OUTPUT" | tail -1)
+          case "$decided" in
+            true|false) echo "the gate recorded published=$decided" ;;
+            *) echo "::error::the gate exited 0 without recording a decision, so every boot step would be skipped"
+               exit 1 ;;
+          esac
 
       - name: Check out keel and put it on PATH
         if: steps.layer.outputs.published == 'true'

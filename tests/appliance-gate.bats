@@ -82,10 +82,18 @@ teardown() {
     gate 404 sonewlayer https://mirror.keellinux.org/layers true
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"::notice::"* ]]
+    [[ "$output" == *"::warning::"* ]]
     [[ "$output" == *"allow_unpublished"* ]]
     grep -qx 'published=false' "$GITHUB_OUTPUT"
     grep -q "Nothing was booted" "$GITHUB_STEP_SUMMARY"
+}
+
+@test "the one path that passes without booting says how it fails to expire" {
+    gate 404 sonewlayer https://mirror.keellinux.org/layers true
+
+    [ "$status" -eq 0 ]
+    grep -q "blocks no merge" "$GITHUB_STEP_SUMMARY"
+    grep -q "A typo in" "$GITHUB_STEP_SUMMARY"
 }
 
 @test "the exemption becomes an error once the layer is published" {
@@ -112,6 +120,12 @@ teardown() {
     gate 403 core https://mirror.keellinux.org/layers true
 
     [ "$status" -eq 3 ]
+    [[ "$output" == *"answered 403"* ]]
+
+    gate 301 core https://mirror.keellinux.org/layers false
+
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"answered 301"* ]]
 }
 
 # --- arguments --------------------------------------------------------
@@ -127,6 +141,33 @@ teardown() {
     gate 200
 
     [ "$status" -eq 4 ]
+}
+
+# --- the decision has to be written down ------------------------------
+
+# The one failure the first version of this script did not have: the
+# append to GITHUB_OUTPUT failed, nothing was recorded, and the script
+# still exited 0. Every boot step is guarded by published == 'true', so
+# that is a job which skips all of them and concludes success, which is
+# the defect this whole script exists to remove. ENOSPC on the runner
+# that assembles multi gigabyte rootfs trees is how it happens.
+
+@test "a decision that cannot be written down is fatal, not silent" {
+    GITHUB_OUTPUT="$TMP/no-such-directory/output"
+
+    gate 200 core https://mirror.keellinux.org/layers false
+
+    [ "$status" -eq 5 ]
+    [[ "$output" == *"cannot record the decision"* ]]
+    [[ "$output" == *"booted nothing"* ]]
+}
+
+@test "the same holds for the exemption, which is the path that passes" {
+    GITHUB_OUTPUT="$TMP/no-such-directory/output"
+
+    gate 404 redis https://mirror.keellinux.org/layers true
+
+    [ "$status" -eq 5 ]
 }
 
 # --- outside Actions --------------------------------------------------
