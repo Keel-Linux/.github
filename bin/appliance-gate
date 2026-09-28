@@ -52,17 +52,57 @@ publish_decision() {
 # A block for the job summary, read from stdin. Outside Actions there is
 # no summary file, and it goes to stdout rather than nowhere: a run whose
 # explanation is dropped is how this defect reads in the first place.
+#
+# A failed write returns rather than dying, because this function is
+# always the right hand side of a pipeline and exit in a pipeline exits a
+# subshell: the script would carry on as if nothing had happened, which
+# is the bug class this whole file is about. Every call site therefore
+# ends "| summary || summary_failed", and pipefail carries the 5 out.
 summary() {
     if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-        cat >> "$GITHUB_STEP_SUMMARY"
+        cat >> "$GITHUB_STEP_SUMMARY" || return 5
     else
         cat
     fi
 }
 
+# The caveats the exemption path prints are the only record that a job
+# which passed booted nothing, so dropping them silently while still
+# concluding success is the same trade this script exists to refuse.
+summary_failed() {
+    die 5 "cannot write the job summary to ${GITHUB_STEP_SUMMARY:-}; a gate that cannot say what it did must not conclude that it did it"
+}
+
+# ::error:: rather than plain stderr, so exits 4 and 5 annotate the run
+# instead of leaving "Process completed with exit code N" as the only
+# thing a reader sees.
 die() {
-    echo "appliance-gate: $2" >&2
+    echo "::error::appliance-gate: $2"
     exit "$1"
+}
+
+# Where the gate's own logic came from. tooling_ref substitutes this
+# script and the node library, so by the standard this file holds for
+# allow_unpublished it has to be visible when it is not main: an input
+# that quietly replaces the code deciding what may be claimed is the
+# next unearned green. The workflow records the commit; this records the
+# ref, on every path, including the exemption path that passes.
+tooling_note() {
+    local ref=${TOOLING_REF:-}
+    if [[ -z "$ref" || "$ref" == main ]]; then
+        return 0
+    fi
+    echo "::warning::this job took bin/appliance-gate and lib/boot-test-nodes.sh from keel-linux/.github at '$ref' and not main; tooling_ref belongs to a temporary caller checking a change to the gate, and a caller that merges should not carry it"
+    {
+        echo "### The gate's logic did not come from main"
+        echo
+        echo "\`tooling_ref: $ref\`, so what decided this job's conclusion was"
+        echo "taken from that ref of \`keel-linux/.github\` and not from"
+        echo "\`main\`. That is the documented way to check a change to the gate"
+        echo "before it merges (profile/WORKFLOWS.md, checking a change to this"
+        echo "workflow), and it is not something a caller that merges should"
+        echo "carry."
+    } | summary || summary_failed
 }
 
 # 200 and no exemption: the ordinary run. The wording reports what this
@@ -101,7 +141,7 @@ never_published() {
         echo "   \`appliance:\` in the caller's own workflow file. The exemption is"
         echo "   then visible to whoever reviews that repository, and it stops"
         echo "   working by itself once the layer is published."
-    } | summary
+    } | summary || summary_failed
     return 1
 }
 
@@ -137,7 +177,7 @@ exempt() {
         echo "   \`appliance:\` answers 404 for ever, so the exemption never"
         echo "   expires and this job stays green having booted nothing. Check"
         echo "   that \`$appliance\` is the name the build host publishes."
-    } | summary
+    } | summary || summary_failed
     return 0
 }
 
@@ -156,7 +196,7 @@ stale_exemption() {
         echo
         echo "Remove that input from the caller's workflow file. The next run"
         echo "then pulls, verifies, assembles and boots the published layer."
-    } | summary
+    } | summary || summary_failed
     return 2
 }
 
@@ -173,7 +213,7 @@ unreachable() {
         echo "\`$manifest\` answered \`$status\`. Only 200 (published) and 404"
         echo "(never published) are expected. An outage is not a skip: nothing"
         echo "was booted and nothing is claimed."
-    } | summary
+    } | summary || summary_failed
     return 3
 }
 
@@ -188,6 +228,8 @@ main() {
         die 4 "usage: appliance-gate STATUS APPLIANCE SOURCE [ALLOW_UNPUBLISHED]"
     [[ -n "$appliance" && -n "$source" ]] ||
         die 4 "usage: appliance-gate STATUS APPLIANCE SOURCE [ALLOW_UNPUBLISHED]"
+
+    tooling_note
 
     manifest="$source/$appliance.manifest"
     case "$status:$allow" in

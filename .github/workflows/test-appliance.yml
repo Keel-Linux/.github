@@ -145,6 +145,11 @@ jobs:
       PARENT: ${{ inputs.parent }}
       ROLES: ${{ inputs.roles }}
       ALLOW_UNPUBLISHED: ${{ inputs.allow_unpublished }}
+      # Read by bin/appliance-gate, which puts a ::warning:: on the run when
+      # it is not main. An input that substitutes the logic deciding what
+      # this job may claim is held to the same standard as
+      # allow_unpublished: it does not get to be invisible.
+      TOOLING_REF: ${{ inputs.tooling_ref }}
       SOURCE: https://mirror.keellinux.org/layers
       GATE: ${{ github.workspace }}/.keel-ci/bin/appliance-gate
       NODES_LIB: ${{ github.workspace }}/.keel-ci/lib/boot-test-nodes.sh
@@ -173,9 +178,7 @@ jobs:
       # wiring below runs against main's copy of it, so nothing here checks
       # the change. The manual procedure in profile/WORKFLOWS.md, a
       # temporary caller setting tooling_ref to the branch, is the only
-      # check there is, and it has to be done by hand. The commit this
-      # resolved to is recorded in the job summary, so a run says which
-      # tooling it used.
+      # check there is, and it has to be done by hand.
       - name: Check out the gate's own tooling
         uses: actions/checkout@v4
         with:
@@ -183,10 +186,21 @@ jobs:
           ref: ${{ inputs.tooling_ref }}
           path: .keel-ci
 
-      - name: Record the tooling commit
+      - name: Record where the gate's logic came from
         run: |
           set -eu
-          echo "KEEL_CI_COMMIT=$(git -C .keel-ci rev-parse HEAD)" >> "$GITHUB_ENV"
+          commit=$(git -C .keel-ci rev-parse HEAD)
+          echo "KEEL_CI_COMMIT=$commit" >> "$GITHUB_ENV"
+          # Written here rather than in the Summary step, which only runs
+          # when a layer was published: the exemption path concludes success
+          # without booting, and that is exactly the path where a
+          # substituted tooling_ref would otherwise leave no trace outside
+          # the raw step environment.
+          {
+            echo "### Gate tooling"
+            echo
+            echo "\`keel-linux/.github\` at \`$TOOLING_REF\`, commit \`$commit\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check the declared roles
         if: inputs.roles != ''
@@ -352,7 +366,6 @@ jobs:
             echo "| nodes | \`${ROLES:-one}\` |"
             echo "| container | \`$NAME\` |"
             echo "| keel | \`$KEEL_COMMIT\` |"
-            echo "| gate tooling | \`$KEEL_CI_COMMIT\` |"
             echo
             echo "This booted the layer the mirror publishes, built before this"
             echo "run. It says nothing about the commit under test: no step here"

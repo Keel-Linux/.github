@@ -170,6 +170,78 @@ teardown() {
     [ "$status" -eq 5 ]
 }
 
+# The caveats the exemption prints are the only record that a job which
+# passed booted nothing. summary() is always the right hand side of a
+# pipeline, and an exit inside a pipeline exits a subshell, so this is
+# also the test that the 5 reaches the caller at all. /dev/full is a real
+# ENOSPC write failure rather than a permission error.
+
+@test "a job summary that cannot be written is fatal, not dropped" {
+    GITHUB_STEP_SUMMARY=/dev/full
+
+    gate 404 redis https://mirror.keellinux.org/layers true
+
+    [ "$status" -eq 5 ]
+    [[ "$output" == *"cannot write the job summary"* ]]
+}
+
+@test "a refusal whose summary cannot be written still refuses" {
+    GITHUB_STEP_SUMMARY=/dev/full
+
+    gate 404 redis https://mirror.keellinux.org/layers false
+
+    [ "$status" -eq 5 ]
+}
+
+# --- where the gate's own logic came from ------------------------------
+
+@test "tooling taken from somewhere other than main is announced" {
+    export TOOLING_REF=ci/some-branch
+
+    gate 200 core https://mirror.keellinux.org/layers false
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"::warning::"* ]]
+    [[ "$output" == *"ci/some-branch"* ]]
+    grep -q "did not come from main" "$GITHUB_STEP_SUMMARY"
+}
+
+@test "the exemption path announces it too, being the one that passes blind" {
+    export TOOLING_REF=ci/some-branch
+
+    gate 404 redis https://mirror.keellinux.org/layers true
+
+    [ "$status" -eq 0 ]
+    grep -q "did not come from main" "$GITHUB_STEP_SUMMARY"
+    grep -q "Nothing was booted" "$GITHUB_STEP_SUMMARY"
+}
+
+@test "a refusal announces it as well, before refusing" {
+    export TOOLING_REF=ci/some-branch
+
+    gate 404 redis https://mirror.keellinux.org/layers false
+
+    [ "$status" -eq 1 ]
+    grep -q "did not come from main" "$GITHUB_STEP_SUMMARY"
+}
+
+@test "main and an unset ref say nothing, which is every real caller" {
+    export TOOLING_REF=main
+
+    gate 200 core https://mirror.keellinux.org/layers false
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"::warning::"* ]]
+    [ ! -s "$GITHUB_STEP_SUMMARY" ]
+
+    unset TOOLING_REF
+    gate 200 core https://mirror.keellinux.org/layers false
+
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"::warning::"* ]]
+    [ ! -s "$GITHUB_STEP_SUMMARY" ]
+}
+
 # --- outside Actions --------------------------------------------------
 
 @test "with no step output or summary to write to, the summary is printed instead" {

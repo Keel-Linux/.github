@@ -160,6 +160,15 @@ Until then the check is manual, and this is it:
 
 3. Open a pull request, read the job, close it and delete the branch.
 
+Any run whose `tooling_ref` is not `main` carries a `::warning::` saying so
+and a line in the job summary naming the ref, on every path including the
+exemption path that passes without booting; the step that checks the tooling
+out records the commit it resolved to in the summary as well, unconditionally.
+The reason is the one that applies to `allow_unpublished`: an input that
+substitutes the logic deciding what the job may claim does not get to be
+invisible, and the way it goes wrong is somebody lifting the block above into
+a caller that merges.
+
 Pick the repository for the state being checked: keel-core for a published
 single node layer, keel-mariadb for the two node path, a repository whose
 layer is 404 for the unpublished paths. Record the run ids in the pull
