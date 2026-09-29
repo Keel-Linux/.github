@@ -6,6 +6,11 @@
 # threshold is 0 (nothing measured on this branch), the job succeeds with a
 # notice so the check exists and protection can require it. A missing script
 # with a threshold above 0 is a failure.
+#
+# The job also refuses a bats suite that contains an inert negation,
+# whether or not it has a coverage script, because such a test asserts
+# nothing and measuring it would report coverage of an assertion that never
+# runs.
 name: test-shell
 
 on:
@@ -44,6 +49,78 @@ jobs:
       KCOV_SHA256: 4cbba86af11f72de0c7514e09d59c7927ed25df7cebdad087f6d3623213b95bf
     steps:
       - uses: actions/checkout@v4
+      # A bats negation only asserts when it is the last command of the test
+      # body: bash does not apply errexit to a negated command, so every
+      # earlier `! cmd` is inert and its test passes whatever the code does.
+      # shellcheck grades the two cases apart, error for the inert ones and
+      # note for the rest, so --severity=error reports exactly the dead
+      # assertions it can see: SC2314 for `! cmd` and `! a | b`, SC2315 for
+      # `! [[ ... ]]`. It sees only a negation at the top level of the body,
+      # so the awk program looks one level down: a `!` after `&&`, `||` or
+      # `;`, in a loop or a conditional branch, in a group or a substitution,
+      # on any line of the body but its last. That last line still decides
+      # the test, as `[ ! -f "$f" ] || ! grep -q x "$f"` does, so it is not a
+      # failure; every other one is inert or, in a loop, decided by the last
+      # iteration alone. A line both report is listed once.
+      # It runs before the coverage job's own work because it needs nothing
+      # but a checkout, and a suite that is not asserting is not worth
+      # measuring. Measured on 2026-09-28 over every default branch in the
+      # organization that carries a bats file: 57 dead assertions in eight
+      # repositories, twelve of them all but one of an IPv6 validator's
+      # rejection cases.
+      - name: Negations that assert
+        run: |
+          command -v shellcheck >/dev/null 2>&1 || {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+          }
+          status=0
+          git ls-files -z '*.bats' \
+            | xargs -0 -r shellcheck -f gcc --shell=bash \
+                --severity=error --include=SC2314,SC2315 \
+                > "$RUNNER_TEMP/shellcheck.txt" || status=$?
+          # shellcheck disable=SC2016  # an awk program, expanded by awk
+          git ls-files -z '*.bats' \
+            | xargs -0 -r awk '
+                FNR == 1 { body = 0 }
+                /^@test .*\{[[:space:]]*$/ { body = 1; n = 0; next }
+                body && /^\}[[:space:]]*$/ {
+                  for (i = 1; i < n; i++) if (neg[i])
+                    print FILENAME ":" num[i] ": error: a nested negation that is not on the last line of the test asserts nothing"
+                  body = 0; next
+                }
+                body && !/^[[:space:]]*(#|$)/ {
+                  n++; num[n] = FNR; neg[n] = 0
+                  cmd = $0
+                  sub(/^[[:space:]]+/, "", cmd)
+                  if (cmd ~ /^(if|elif|while|until)[[:space:]]/)
+                    if (!sub(/.*[;[:space:]](then|do)[[:space:]]/, " ", cmd)) next
+                  if (cmd ~ /(^|[;&|{()]|[[:space:]](do|then|else))[[:space:]]*![[:space:]]/ &&
+                      cmd !~ /(^|[;&|{()])[[:space:]]*run[[:space:]]+![[:space:]]/)
+                    neg[n] = 1
+                }' > "$RUNNER_TEMP/nested.txt" || status=$?
+          # shellcheck disable=SC2016  # an awk program, expanded by awk
+          awk -F: 'NR == FNR { seen[$1 ":" $2] = 1; print; next }
+                   !(($1 ":" $2) in seen)' "$RUNNER_TEMP/shellcheck.txt" "$RUNNER_TEMP/nested.txt" \
+            | sort -t: -k1,1 -k2,2n > "$RUNNER_TEMP/inert-negations.txt"
+          if [ -s "$RUNNER_TEMP/inert-negations.txt" ]; then
+            cat "$RUNNER_TEMP/inert-negations.txt"
+            status=1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "::error::a bats negation that is not the last command of its test asserts nothing; write it 'run ! cmd' (needs bats_require_minimum_version 1.5.0)"
+          fi
+          {
+            echo "## Negations that assert"
+            echo '```'
+            if [ -s "$RUNNER_TEMP/inert-negations.txt" ]; then
+              cat "$RUNNER_TEMP/inert-negations.txt"
+            else
+              echo "no inert negations in $(git ls-files '*.bats' | wc -l) bats files"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
       - name: Check for the coverage script
         id: script
         run: |
