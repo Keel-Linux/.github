@@ -194,10 +194,15 @@ unit tested in `tests/appliance-gate.bats` and measured by
   Bootstrap rule: if the script is absent and the threshold is 0 the job
   passes with a notice (nothing is measured yet); if the script is absent and
   the threshold is above 0 the job fails. shellcheck runs first, advisory,
-  except for one check that blocks: SC2314, a bats negation that is not the
-  last command of its test body. Such a `! cmd` asserts nothing, because bash
-  does not apply errexit to a negated command, so the test passes whatever
-  the code does. Write it `run ! cmd` and declare
+  except for one check that blocks, `Negations that assert`: a bats negation
+  that is not the last command of its test body. Such a `! cmd` asserts
+  nothing, because bash does not apply errexit to a negated command, so the
+  test passes whatever the code does. shellcheck reports the ones at the top
+  level of the body (SC2314 for `! cmd`, SC2315 for `! [[ ... ]]`, severity
+  error only, so a negation in final position is not a failure); a short awk
+  program reports the ones shellcheck does not see, nested after `&&`, `||`
+  or `;`, in a loop, a branch, a group or a substitution, on any line of the
+  body but its last. Write it `run ! cmd` and declare
   `bats_require_minimum_version 1.5.0`. This one runs before the coverage
   work and without a coverage script, since a suite that is not asserting is
   not worth measuring.
