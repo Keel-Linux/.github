@@ -1,24 +1,58 @@
-# Reusable: fetch an appliance's layers from the project mirror, verify
-# them, assemble the chain into one or more scratch rootfs trees, boot them
-# in LXC containers on one bridge and run the appliance repository's own
-# tests/boot-test.sh against them. Nothing here builds a layer.
+# Reusable: boot the layer an appliance has already published, and run the
+# appliance repository's own tests/boot-test.sh against it.
 #
-# One container is the default and is unchanged. A repository that needs
-# several declares them with the `roles` input, one role name per node:
-# `roles: "primary replica"` for replication, `roles: "galera galera
-# galera"` for a three node cluster later. The number of nodes is the
-# number of names, so nothing in this workflow assumes two. How each node
-# learns which one it is, and how a test addresses another one, is
-# lib/boot-test-nodes.sh of this repository, which the job checks out and
-# hands to the boot test with --nodes-lib; that file is unit tested here
-# because this is the repository with a gate on it.
+# What this job proves, and what it does not. It fetches the layer from the
+# project mirror, verifies it, assembles the chain into one or more scratch
+# rootfs trees, boots them in LXC containers on one bridge and runs the
+# repository's boot test. Every byte it touches was built and published
+# before the run started, so what it proves is that the published layer
+# boots. It is not evidence about the branch: on a pull request that changes
+# the recipe, the layer on the mirror is the one built from the default
+# branch, so the change is never exercised here. The job id says as much,
+# because until 2026-09-28 it was `build-and-boot`, and a name that reads
+# like "this branch was built and booted" was taken for exactly that when
+# branch protection was applied. Nothing here builds a layer.
+#
+# The value it does have is real and worth keeping: it catches a published
+# layer that no longer boots, and it catches the parent mismatch it was
+# written for.
+#
+# A layer that has never been published fails this job. Before 2026-09-28 it
+# passed with a notice, and a notice is not a conclusion: branch protection
+# and `gh pr checks` read the conclusion, so keel-redis#5 carried a green
+# gate produced in 11 seconds by a job that pulled, verified and booted
+# nothing. GitHub leaves a workflow job no third answer to reach for: a job
+# skipped by `if:` reports success and does not block a merge (Actions
+# documentation, "Using conditions to control job execution"), and `exit 78`,
+# the old neutral conclusion, is a plain failure now (measured on this
+# repository, run 36372853847). Failure is the only conclusion that withholds
+# a merge, so an unpublished layer fails, and a repository whose first layer
+# does not exist yet says so with `allow_unpublished`.
+#
+# The decision taken from the mirror's answer is bin/appliance-gate of this
+# repository, unit tested in tests/appliance-gate.bats and measured by
+# tests/coverage.sh, because the honesty of the gate is the part most worth
+# having tests on (decision 0004). This job holds the curl; the script
+# decides what may be claimed from its answer.
+#
+# One container is the default. A repository that needs several declares
+# them with the `roles` input, one role name per node: `roles: "primary
+# replica"` for replication, `roles: "galera galera galera"` for a three
+# node cluster later. The number of nodes is the number of names, so
+# nothing in this workflow assumes two. How each node learns which one it
+# is, and how a test addresses another one, is lib/boot-test-nodes.sh of
+# this repository, which the job checks out and hands to the boot test with
+# --nodes-lib; that file is unit tested here because this is the repository
+# with a gate on it.
 #
 # Why it fetches instead of building: the self-hosted runner keel-lxc-1
 # lives on the public services VM (docs/releases-host.md of the keel
 # repository), which has lxc, kcov, bats, zstd and python3-yaml but no
 # fab, deck or buildtasks and no /turnkey trees. The build host builds and
 # publishes the layers, this runner consumes them over IPv6. A job that
-# called bt-layer here would fail on the first line.
+# called bt-layer here would fail on the first line. Building from the
+# branch instead needs that build host, which is serialised behind a lock,
+# so it does not fit a per-pull-request check and is not attempted here.
 #
 # keel comes from a checkout of keel-linux/keel at main, not from a
 # package: decision 0005 is still open, nothing is signed, and
@@ -26,12 +60,8 @@
 # install. The checkout needs only python3 and PyYAML, both already on the
 # runner, and the commit it resolved to is printed in the job summary.
 #
-# A layer that has never been published is not a failure: the job says so
-# with a notice and in the job summary, and succeeds, so a repository can
-# carry the gate from its first day.
-#
 # A caller job named "appliance" produces the status check
-# "appliance / build-and-boot".
+# "appliance / boot-published-layer".
 name: test-appliance
 
 on:
@@ -64,6 +94,39 @@ on:
         required: false
         type: string
         default: ""
+      allow_unpublished:
+        description: >-
+          A layer that has never been published cannot be booted, and by
+          default that fails this job instead of passing it. A repository
+          whose first layer does not exist yet sets this to true to say so
+          out loud, in its own workflow file, where whoever reviews that
+          repository sees it. The exemption dies on its own: once the
+          manifest answers 200 this input is an error. Two ways that expiry
+          does not happen on its own, both printed in the job summary of a
+          run that uses it: the error only stops somebody where this check
+          is a required status, and it keys on the name declared in
+          `appliance`, so a typo there answers 404 for ever and the
+          exemption never expires.
+        required: false
+        type: boolean
+        default: false
+      tooling_ref:
+        description: >-
+          Ref of keel-linux/.github this job takes bin/appliance-gate and
+          lib/boot-test-nodes.sh from. The default, main, is what every
+          caller uses and the only value any of them should set. It is an
+          input because nothing else checks a change to this workflow before
+          it merges: tests/coverage.sh exercises the script on its own and
+          no job exercises it in place, so a pull request here would
+          otherwise run a new workflow against main's copy of the script. A
+          temporary caller pointed at a branch of keel-linux/.github sets
+          this to that same branch, and the job then runs the workflow and
+          the tooling from one commit. It should be github.job_workflow_sha
+          and no input at all; actionlint 1.7.7 does not know that property
+          and this organization's lint gate fails on any finding.
+        required: false
+        type: string
+        default: main
       timeout:
         description: minutes before the job is cancelled
         required: false
@@ -74,14 +137,21 @@ permissions:
   contents: read
 
 jobs:
-  build-and-boot:
+  boot-published-layer:
     runs-on: [self-hosted, keel-lxc]
     timeout-minutes: ${{ inputs.timeout }}
     env:
       APPLIANCE: ${{ inputs.appliance }}
       PARENT: ${{ inputs.parent }}
       ROLES: ${{ inputs.roles }}
+      ALLOW_UNPUBLISHED: ${{ inputs.allow_unpublished }}
+      # Read by bin/appliance-gate, which puts a ::warning:: on the run when
+      # it is not main. An input that substitutes the logic deciding what
+      # this job may claim is held to the same standard as
+      # allow_unpublished: it does not get to be invisible.
+      TOOLING_REF: ${{ inputs.tooling_ref }}
       SOURCE: https://mirror.keellinux.org/layers
+      GATE: ${{ github.workspace }}/.keel-ci/bin/appliance-gate
       NODES_LIB: ${{ github.workspace }}/.keel-ci/lib/boot-test-nodes.sh
       # One scratch tree per run and per attempt, so two runs never share a
       # rootfs or a layer cache. NAME is the container name with one node
@@ -93,28 +163,102 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check out the gate's node library and check the declared roles
+      # The gate's own tooling: bin/appliance-gate, which decides what this
+      # job may claim from the mirror's answer, and lib/boot-test-nodes.sh,
+      # which the boot test sources. It should be pinned to
+      # github.job_workflow_sha, the commit this reusable workflow is
+      # running from, so a caller pinned to a tag would get the tooling
+      # belonging to that tag; actionlint 1.7.7 does not know that property
+      # and this organization's lint gate fails on any finding, so it
+      # defaults to main, which is the ref every caller uses
+      # (profile/WORKFLOWS.md).
+      #
+      # The consequence, until that property can be used: a pull request
+      # against keel-linux/.github that changes bin/appliance-gate or the
+      # wiring below runs against main's copy of it, so nothing here checks
+      # the change. The manual procedure in profile/WORKFLOWS.md, a
+      # temporary caller setting tooling_ref to the branch, is the only
+      # check there is, and it has to be done by hand.
+      - name: Check out the gate's own tooling
+        uses: actions/checkout@v4
+        with:
+          repository: keel-linux/.github
+          ref: ${{ inputs.tooling_ref }}
+          path: .keel-ci
+
+      - name: Record where the gate's logic came from
+        run: |
+          set -eu
+          commit=$(git -C .keel-ci rev-parse HEAD)
+          echo "KEEL_CI_COMMIT=$commit" >> "$GITHUB_ENV"
+          # Written here rather than in the Summary step, which only runs
+          # when a layer was published: the exemption path concludes success
+          # without booting, and that is exactly the path where a
+          # substituted tooling_ref would otherwise leave no trace outside
+          # the raw step environment.
+          {
+            echo "### Gate tooling"
+            echo
+            echo "\`keel-linux/.github\` at \`$TOOLING_REF\`, commit \`$commit\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the declared roles
         if: inputs.roles != ''
         run: |
           set -eu
-          # The library the boot test sources is this workflow's own, fetched
-          # the same way keel is below, and the commit is recorded in the job
-          # summary. It should be pinned to github.job_workflow_sha, the
-          # commit the reusable workflow itself is running from, so a caller
-          # pinned to a tag would get the library belonging to that tag;
-          # actionlint 1.7.7 does not know that property and this
-          # organization's lint gate fails on any finding, so it is main,
-          # which is the ref every caller uses (profile/WORKFLOWS.md).
-          rm -rf .keel-ci
-          git clone --quiet --depth 1 --branch main \
-            https://github.com/keel-linux/.github.git .keel-ci
-          echo "NODES_LIB_COMMIT=$(git -C .keel-ci rev-parse HEAD)" >> "$GITHUB_ENV"
           # shellcheck source=/dev/null
           . "$NODES_LIB"
           echo "$(btn_node_count "$ROLES") nodes declared: $ROLES"
           btn_nodes "$NAME" "$ROLES"
 
+      - name: Ask the mirror for the layer, and decide what may be claimed
+        id: layer
+        run: |
+          set -eu
+          manifest=$SCRATCH-manifest
+          mkdir -p "$(dirname "$manifest")"
+          # Only an answer of 404 means "not published yet". A name that does
+          # not resolve, a refused connection or a 5xx is the mirror being
+          # unreachable, and reading one of those as "not published" would
+          # turn every outage into a check that tested nothing.
+          #
+          # The family is left to the resolver rather than forced with -6,
+          # which is what keel pull does too. On keel-lxc-1 the mirror is this
+          # same host and its own public name resolves to the machine itself,
+          # so the request never leaves it; anywhere the name has an AAAA
+          # record it goes over IPv6.
+          status=$(curl -sS --retry 2 --retry-delay 3 -o "$manifest" \
+                     -w '%{http_code}' "$SOURCE/$APPLIANCE.manifest") || {
+            code=$?
+            rm -f "$manifest"
+            echo "::error::cannot reach $SOURCE ($APPLIANCE.manifest): curl exited $code"
+            exit 1
+          }
+          [ "$status" = 200 ] || rm -f "$manifest"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+          # bin/appliance-gate writes published=true or published=false to
+          # GITHUB_OUTPUT, writes the job summary for whatever it decided,
+          # and exits non-zero on every state this job must not pass: a
+          # layer that was never published and not declared as such, a
+          # declared exemption that has outlived the layer it excused, any
+          # answer that is neither 200 nor 404, and a decision it could not
+          # write down.
+          "$GATE" "$status" "$APPLIANCE" "$SOURCE" "$ALLOW_UNPUBLISHED"
+          # Every boot step below is guarded by published == 'true', so a
+          # decision that did not reach GITHUB_OUTPUT would skip all of them
+          # and leave this job green having booted nothing, which is the
+          # defect the gate exists to remove. The script makes that write
+          # fatal; this reads the file back so that the guard those steps
+          # depend on is checked here rather than assumed.
+          decided=$(awk -F= '$1 == "published" { print $2 }' "$GITHUB_OUTPUT" | tail -1)
+          case "$decided" in
+            true|false) echo "the gate recorded published=$decided" ;;
+            *) echo "::error::the gate exited 0 without recording a decision, so every boot step would be skipped"
+               exit 1 ;;
+          esac
+
       - name: Check out keel and put it on PATH
+        if: steps.layer.outputs.published == 'true'
         run: |
           set -eu
           rm -rf .keel
@@ -130,55 +274,6 @@ jobs:
           chmod +x .keel/bin/keel
           echo "$GITHUB_WORKSPACE/.keel/bin" >> "$GITHUB_PATH"
           echo "KEEL_COMMIT=$(git -C .keel rev-parse HEAD)" >> "$GITHUB_ENV"
-
-      - name: Is the layer published?
-        id: layer
-        run: |
-          set -eu
-          manifest=$SCRATCH-manifest
-          mkdir -p "$(dirname "$manifest")"
-          # Only an answer of 404 means "not published yet". A name that does
-          # not resolve, a refused connection or a 5xx is the mirror being
-          # unreachable, and skipping on that would turn every outage into a
-          # green check that tested nothing.
-          #
-          # The family is left to the resolver rather than forced with -6,
-          # which is what keel pull does too. On keel-lxc-1 the mirror is this
-          # same host and its own public name resolves to the machine itself,
-          # so the request never leaves it; anywhere the name has an AAAA
-          # record it goes over IPv6.
-          status=$(curl -sS --retry 2 --retry-delay 3 -o "$manifest" \
-                     -w '%{http_code}' "$SOURCE/$APPLIANCE.manifest") || {
-            code=$?
-            rm -f "$manifest"
-            echo "::error::cannot reach $SOURCE ($APPLIANCE.manifest): curl exited $code"
-            exit 1
-          }
-          case "$status" in
-            200)
-              echo "published=true" >> "$GITHUB_OUTPUT"
-              echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
-              ;;
-            404)
-              echo "published=false" >> "$GITHUB_OUTPUT"
-              rm -f "$manifest"
-              echo "::notice::$SOURCE/$APPLIANCE.manifest is not on the mirror yet, so there is nothing to boot; the job passes and this is recorded in the summary"
-              {
-                echo "## Appliance test skipped"
-                echo
-                echo "The layer \`$APPLIANCE\` has never been published to \`$SOURCE/\`:"
-                echo "its manifest answers 404. Build it on the build host"
-                echo "(\`bt-layer $APPLIANCE\`) and publish it (docs/releases-host.md,"
-                echo "publishing a layer); this job then boots it on the next run."
-                echo "Nothing was built, assembled or booted."
-              } >> "$GITHUB_STEP_SUMMARY"
-              ;;
-            *)
-              rm -f "$manifest"
-              echo "::error::$SOURCE/$APPLIANCE.manifest answered $status; only 200 and 404 are expected"
-              exit 1
-              ;;
-          esac
 
       - name: Check the published parent against the caller
         if: steps.layer.outputs.published == 'true'
@@ -214,7 +309,7 @@ jobs:
             *) echo "::error::keel verify exited $code"; exit "$code" ;;
           esac
 
-      - name: Assemble and boot, then run the appliance's boot test
+      - name: Assemble and boot the published layer, then run the appliance's boot test
         if: steps.layer.outputs.published == 'true'
         run: |
           set -eu
@@ -249,21 +344,32 @@ jobs:
 
       - name: Summary
         if: steps.layer.outputs.published == 'true'
+        env:
+          MANIFEST: ${{ steps.layer.outputs.manifest }}
         run: |
+          set -eu
+          # What the layer that booted was built from, read off its own
+          # manifest. It is the answer to the question this job is most
+          # often asked by mistake, "did the change boot", and the answer is
+          # that what booted here predates the change.
+          built=$(awk '$1 == "product_commit" { print $2 }' "$MANIFEST")
+          pool=$(awk '$1 == "pool" { print $2 }' "$MANIFEST")
           {
-            echo "## Appliance test"
+            echo "## The published $APPLIANCE layer booted"
             echo
             echo "| Item | Value |"
             echo "| --- | --- |"
             echo "| appliance | \`$APPLIANCE\` |"
             echo "| parent | \`${PARENT:-none}\` |"
             echo "| source | \`$SOURCE\` |"
+            echo "| built from | \`${built:-unrecorded}\`, pool \`${pool:-unrecorded}\` |"
             echo "| nodes | \`${ROLES:-one}\` |"
             echo "| container | \`$NAME\` |"
             echo "| keel | \`$KEEL_COMMIT\` |"
-            if [ -n "$ROLES" ]; then
-              echo "| node library | \`$NODES_LIB_COMMIT\` |"
-            fi
+            echo
+            echo "This booted the layer the mirror publishes, built before this"
+            echo "run. It says nothing about the commit under test: no step here"
+            echo "builds from the branch."
           } >> "$GITHUB_STEP_SUMMARY"
           # The topology comes from the boot test, which is the only thing
           # that knows the addresses the bridge handed out, and is rendered
