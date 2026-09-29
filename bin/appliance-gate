@@ -1,0 +1,246 @@
+#!/bin/bash
+# What the appliance gate may claim, given the mirror's answer for a
+# layer manifest.
+#
+# usage: appliance-gate STATUS APPLIANCE SOURCE [ALLOW_UNPUBLISHED]
+#
+#   STATUS             the HTTP status of SOURCE/APPLIANCE.manifest
+#   APPLIANCE          layer name without the keel- prefix
+#   SOURCE             the mirror the manifest was asked for
+#   ALLOW_UNPUBLISHED  the literal "true" when the caller declares the
+#                      bootstrap exemption in its own workflow file
+#
+# Exit codes:
+#   0  200, no exemption: there is a published layer to boot
+#   0  404, exemption declared: nothing to boot, and the caller said so
+#   1  404, no exemption: the layer has never been published
+#   2  200, exemption declared: the exemption outlived its reason
+#   3  any other answer: the mirror is neither saying yes nor saying no
+#   4  the arguments are not usable
+#   5  the decision could not be written down, so none may be acted on
+#
+# Why this exists. Until 2026-09-28 the gate answered 404 with a notice,
+# a job summary and the conclusion "success", and branch protection reads
+# the conclusion, not the summary. keel-redis#5 therefore carried a green
+# "appliance / build-and-boot" produced in 11 seconds by a job that built,
+# pulled, verified and booted nothing, and looked ready to merge. A
+# skipped boot must not be reportable as a pass.
+#
+# Why it is a script and not shell inside the workflow: decision 0004, and
+# because this is the one piece of the gate whose honesty can be measured.
+# The calling step holds the curl; every decision taken from its answer is
+# here, where tests/appliance-gate.bats can ask all of them.
+set -uo pipefail
+
+# The decision the calling step reads back: whether there is a published
+# layer for the rest of the job to pull, verify, assemble and boot.
+#
+# A write that fails here is fatal, and that is the whole reason this
+# function exists rather than an inline redirection. Every boot step is
+# guarded by published == 'true', so a swallowed write leaves the output
+# empty, skips all six of them and concludes success: the defect this
+# script was written to remove, reached through an I/O error instead of
+# by design. GITHUB_OUTPUT lives on the runner that assembles multi
+# gigabyte rootfs trees, so ENOSPC is the way it happens.
+publish_decision() {
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        printf 'published=%s\n' "$1" >> "$GITHUB_OUTPUT" ||
+            die 5 "cannot record the decision in $GITHUB_OUTPUT; without it every boot step is skipped and the job would pass having booted nothing"
+    fi
+}
+
+# A block for the job summary, read from stdin. Outside Actions there is
+# no summary file, and it goes to stdout rather than nowhere: a run whose
+# explanation is dropped is how this defect reads in the first place.
+#
+# A failed write returns rather than dying, because this function is
+# always the right hand side of a pipeline and exit in a pipeline exits a
+# subshell: the script would carry on as if nothing had happened, which
+# is the bug class this whole file is about. Every call site therefore
+# ends "| summary || summary_failed", and pipefail carries the 5 out.
+summary() {
+    if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+        cat >> "$GITHUB_STEP_SUMMARY" || return 5
+    else
+        cat
+    fi
+}
+
+# The caveats the exemption path prints are the only record that a job
+# which passed booted nothing, so dropping them silently while still
+# concluding success is the same trade this script exists to refuse.
+summary_failed() {
+    die 5 "cannot write the job summary to ${GITHUB_STEP_SUMMARY:-}; a gate that cannot say what it did must not conclude that it did it"
+}
+
+# ::error:: rather than plain stderr, so exits 4 and 5 annotate the run
+# instead of leaving "Process completed with exit code N" as the only
+# thing a reader sees.
+die() {
+    echo "::error::appliance-gate: $2"
+    exit "$1"
+}
+
+# Where the gate's own logic came from. tooling_ref substitutes this
+# script and the node library, so by the standard this file holds for
+# allow_unpublished it has to be visible when it is not main: an input
+# that quietly replaces the code deciding what may be claimed is the
+# next unearned green. The workflow records the commit; this records the
+# ref, on every path, including the exemption path that passes.
+tooling_note() {
+    local ref=${TOOLING_REF:-}
+    if [[ -z "$ref" || "$ref" == main ]]; then
+        return 0
+    fi
+    echo "::warning::this job took bin/appliance-gate and lib/boot-test-nodes.sh from keel-linux/.github at '$ref' and not main; tooling_ref belongs to a temporary caller checking a change to the gate, and a caller that merges should not carry it"
+    {
+        echo "### The gate's logic did not come from main"
+        echo
+        echo "\`tooling_ref: $ref\`, so what decided this job's conclusion was"
+        echo "taken from that ref of \`keel-linux/.github\` and not from"
+        echo "\`main\`. That is the documented way to check a change to the gate"
+        echo "before it merges (profile/WORKFLOWS.md, checking a change to this"
+        echo "workflow), and it is not something a caller that merges should"
+        echo "carry."
+    } | summary || summary_failed
+}
+
+# 200 and no exemption: the ordinary run. The wording reports what this
+# step found and hands the rest of the job the decision. It does not
+# promise a boot, because this step is not the one that boots: whether
+# the layer pulls, verifies, assembles and comes up is the conclusion of
+# the steps after it, and a line here claiming otherwise would be the
+# same kind of unearned statement the rest of this change removes.
+boot() {
+    local appliance=$1 manifest=$2
+    publish_decision true
+    echo "appliance-gate: $manifest answers 200, so the $appliance layer is published and this job has something to boot"
+    echo "appliance-gate: it was built and published before this run, so whatever the boot proves, it is not evidence about this branch"
+    return 0
+}
+
+# 404 and no exemption: the case this script was written for.
+never_published() {
+    local appliance=$1 manifest=$2
+    echo "::error::$manifest answers 404: the $appliance layer has never been published, so this job cannot boot it and will not report that it did"
+    {
+        echo "## Nothing was booted"
+        echo
+        echo "\`$manifest\` answers 404: the \`$appliance\` layer has never been"
+        echo "published, so there is nothing to pull, assemble or boot. This job"
+        echo "fails rather than passing, because a conclusion of success here"
+        echo "would satisfy branch protection on the strength of no test at all."
+        echo
+        echo "Two ways out:"
+        echo
+        echo "1. Build the layer on the build host (\`bt-layer $appliance\`) and"
+        echo "   publish it (docs/releases-host.md, publishing a layer). This job"
+        echo "   then boots it on the next run."
+        echo "2. If this repository has no layer yet and is opening its first"
+        echo "   pull requests, declare it: \`allow_unpublished: true\` beside"
+        echo "   \`appliance:\` in the caller's own workflow file. The exemption is"
+        echo "   then visible to whoever reviews that repository, and it stops"
+        echo "   working by itself once the layer is published."
+    } | summary || summary_failed
+    return 1
+}
+
+# 404 and the exemption: the bootstrap case, declared out loud. It is a
+# warning and not a notice, so the run carries an annotation a reader
+# sees without opening the summary. This is the one path that concludes
+# success having booted nothing, so it is the one that has to say the
+# most about how little it proves, and about the two ways it can fail to
+# expire.
+exempt() {
+    local appliance=$1 manifest=$2
+    publish_decision false
+    echo "::warning::$manifest answers 404 and this caller declares allow_unpublished, so nothing is built, assembled or booted; remove that input once the $appliance layer is published"
+    {
+        echo "## Nothing was booted"
+        echo
+        echo "The \`$appliance\` layer has never been published (\`$manifest\`"
+        echo "answers 404) and this caller declares \`allow_unpublished: true\`,"
+        echo "so this job pulled, assembled and booted nothing. It proves"
+        echo "nothing about this branch or about the appliance."
+        echo
+        echo "Publish the layer (\`bt-layer $appliance\`, then"
+        echo "docs/releases-host.md) and remove \`allow_unpublished\` from the"
+        echo "caller. Leaving it in place is an error once the layer exists."
+        echo
+        echo "Two ways that expiry does not happen on its own, so somebody has"
+        echo "to look:"
+        echo
+        echo "1. The expiry is an error on this check. Where this check is not"
+        echo "   a required status, that error blocks no merge, and this is the"
+        echo "   population most likely to hold an exemption."
+        echo "2. The expiry keys on the name declared here. A typo in"
+        echo "   \`appliance:\` answers 404 for ever, so the exemption never"
+        echo "   expires and this job stays green having booted nothing. Check"
+        echo "   that \`$appliance\` is the name the build host publishes."
+    } | summary || summary_failed
+    return 0
+}
+
+# 200 and the exemption: the exemption has outlived its reason. This is
+# what keeps it from becoming permanent, so it is an error and not a
+# warning: a warning on a green check is read by nobody.
+stale_exemption() {
+    local appliance=$1 manifest=$2
+    echo "::error::$manifest answers 200, so the $appliance layer is published and allow_unpublished no longer has anything to excuse; remove it from the caller"
+    {
+        echo "## The bootstrap exemption is stale"
+        echo
+        echo "The \`$appliance\` layer is published (\`$manifest\` answers 200), so"
+        echo "this job can boot it, and the caller still declares"
+        echo "\`allow_unpublished: true\`."
+        echo
+        echo "Remove that input from the caller's workflow file. The next run"
+        echo "then pulls, verifies, assembles and boots the published layer."
+    } | summary || summary_failed
+    return 2
+}
+
+# Anything else: a name that does not resolve, a refused connection, a
+# redirect, a 5xx. Treating one of those as "not published yet" would
+# turn every outage into a green check that tested nothing, which is the
+# same defect wearing a different hat.
+unreachable() {
+    local status=$1 manifest=$2
+    echo "::error::$manifest answered $status; only 200 and 404 are expected, so this job cannot tell whether the layer is published"
+    {
+        echo "## The mirror did not answer yes or no"
+        echo
+        echo "\`$manifest\` answered \`$status\`. Only 200 (published) and 404"
+        echo "(never published) are expected. An outage is not a skip: nothing"
+        echo "was booted and nothing is claimed."
+    } | summary || summary_failed
+    return 3
+}
+
+main() {
+    local status appliance source allow manifest
+    status=${1:-}
+    appliance=${2:-}
+    source=${3:-}
+    allow=${4:-false}
+
+    [[ "$status" =~ ^[1-5][0-9][0-9]$ ]] ||
+        die 4 "usage: appliance-gate STATUS APPLIANCE SOURCE [ALLOW_UNPUBLISHED]"
+    [[ -n "$appliance" && -n "$source" ]] ||
+        die 4 "usage: appliance-gate STATUS APPLIANCE SOURCE [ALLOW_UNPUBLISHED]"
+
+    tooling_note
+
+    manifest="$source/$appliance.manifest"
+    case "$status:$allow" in
+        200:true) stale_exemption "$appliance" "$manifest" ;;
+        200:*)    boot "$appliance" "$manifest" ;;
+        404:true) exempt "$appliance" "$manifest" ;;
+        404:*)    never_published "$appliance" "$manifest" ;;
+        *)        unreachable "$status" "$manifest" ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
