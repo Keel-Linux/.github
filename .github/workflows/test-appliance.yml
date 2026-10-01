@@ -193,6 +193,7 @@ jobs:
     steps:
       # The name ends up in paths, container names and the mirror URL.
       - name: Check the appliance name
+        id: name
         run: |
           if [[ ! $APPLIANCE =~ ^[a-z0-9-]+$ ]]; then
             echo "::error::appliance '$APPLIANCE' is not a name: lower case letters, digits and dashes only"
@@ -429,7 +430,11 @@ jobs:
           fi
 
       - name: Destroy every container and the scratch rootfs
-        if: always()
+        # Always, except when the appliance name was refused (or never
+        # checked): SCRATCH and NAME are built from it, and a cleanup must
+        # not act on a path made from a name nobody validated. Nothing was
+        # created before that check, so nothing is left behind.
+        if: always() && steps.name.outcome == 'success'
         run: |
           set -u
           # Whatever the outcome, including a cancelled run, which reaches
