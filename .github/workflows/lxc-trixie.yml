@@ -1,0 +1,316 @@
+# Reusable: run a repository's commands as root in a Debian trixie system
+# container, an unprivileged LXC container with its own systemd, on the
+# self-hosted runner keel-lxc-1 (labels self-hosted, keel-lxc).
+#
+# Keel's standard is system containers only. No job of this organization
+# runs in an application container: no `container:` job key, no services
+# with images, no Docker or podman, no docker:// action. A job that needs
+# Debian trixie calls this workflow instead, for building a package
+# (dpkg-buildpackage or gbp), linting it, running bats or autopkgtest.
+#
+# The container comes from the LXC download template and is created, started
+# and destroyed by the runner user, with no sudo, the way bin/unprivileged-lxc
+# of this repository starts the appliance gate's containers: the idmap, the
+# veth on lxcbr0 and the AppArmor profile come from the runner's
+# ~/.config/lxc/default.conf, lxc-start runs in a delegated
+# `systemd-run --user --scope` and lxc-attach in a scope of the same user
+# manager (docs/ci-cd.md section 6 of the keel repository). Root in the
+# container is a subordinate id of the runner on the host. Nothing is
+# installed on the runner; whatever the commands need, they install inside
+# the container, which is thrown away at the end, failure and cancellation
+# included.
+#
+# The repository is checked out on the runner and copied to /src in the
+# container, .git included (fetch-depth decides how much history), owned by
+# the container's root. The commands run there, as root, with bash -euo
+# pipefail, stdin closed, and HOME=/root, DEBIAN_FRONTEND=noninteractive,
+# LANG=C.UTF-8, CI=true and WORKSPACE=/src in a cleared environment.
+#
+# A pull request from a fork never reaches the self-hosted runner: the job is
+# skipped for pull_request events whose head is another repository and for
+# every pull_request_target event, whatever the caller says. A skipped job
+# reports success, so the job fork-not-run fails on a hosted runner in
+# exactly that case, and the pull request carries a red
+# "<caller job> / fork-not-run" saying why. Callers therefore put no `if:`
+# of their own on the calling job: one would skip fork-not-run too.
+#
+# The checkouts keep no credentials (persist-credentials: false), because
+# the tree is copied into the container whole and a directory of it may be
+# uploaded; bin/lxc-trixie-inputs refuses an artifact-dir that names /src
+# itself.
+#
+# A caller job named "build" produces the status check "build / trixie".
+name: lxc-trixie
+
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: >-
+          Shell commands to run in /src as root in the container. Exactly one
+          of run and script is set.
+        required: false
+        type: string
+        default: ""
+      script:
+        description: >-
+          Path, relative to the repository root, of a script to run with
+          bash in /src as root in the container. Exactly one of run and
+          script is set.
+        required: false
+        type: string
+        default: ""
+      systemd:
+        description: >-
+          The container always boots its own systemd, as a system container
+          does. True waits until systemd reports running or degraded and
+          fails the job otherwise, for commands that drive units with
+          systemctl (autopkgtest of a service). False only waits for the
+          network.
+        required: false
+        type: boolean
+        default: false
+      backports:
+        description: enable trixie-backports in the container before the commands run
+        required: false
+        type: boolean
+        default: false
+      fetch-depth:
+        description: history to check out, as actions/checkout; 0 is all of it, which gbp needs
+        required: false
+        type: number
+        default: 1
+      download:
+        description: name of an artifact of this run to put in /src/<download-dir> before the commands run
+        required: false
+        type: string
+        default: ""
+      download-dir:
+        description: directory, relative to /src, the downloaded artifact goes to
+        required: false
+        type: string
+        default: dist
+      artifact-dir:
+        description: >-
+          Directory, relative to /src, whose contents are uploaded as the
+          artifact artifact-name after the commands succeed. Empty uploads
+          nothing. An empty or missing directory fails the job.
+        required: false
+        type: string
+        default: ""
+      artifact-name:
+        description: name of the uploaded artifact
+        required: false
+        type: string
+        default: trixie
+      timeout:
+        description: minutes before the job is cancelled
+        required: false
+        type: number
+        default: 60
+      tooling_ref:
+        description: >-
+          Ref of keel-linux/.github the job takes bin/lxc-trixie-inputs and
+          bin/unprivileged-lxc from. Every caller leaves it at main; it
+          exists for the manual check of a change to this workflow, as
+          test-appliance.yml's input of the same name does.
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  # A job skipped by its `if:` reports success, so on a pull request from a
+  # fork "<caller job> / trixie" would show as passed having run nothing.
+  # This job, on a hosted runner, fails in that case and only then, as
+  # test-appliance.yml's fork-not-booted does. To test a fork's change, push
+  # it to a branch of the repository itself.
+  fork-not-run:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse to run a fork's pull request on keel-lxc-1
+        run: |
+          echo "::error::pull requests from forks do not run on keel-lxc-1, so this build or test did not run; push the change to a branch of $GITHUB_REPOSITORY to run it"
+          exit 1
+
+  trixie:
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, keel-lxc]
+    timeout-minutes: ${{ inputs.timeout }}
+    env:
+      RUN: ${{ inputs.run }}
+      SCRIPT: ${{ inputs.script }}
+      SYSTEMD: ${{ inputs.systemd }}
+      BACKPORTS: ${{ inputs.backports }}
+      DOWNLOAD: ${{ inputs.download }}
+      DOWNLOAD_DIR: ${{ inputs.download-dir }}
+      ARTIFACT_DIR: ${{ inputs.artifact-dir }}
+      NAME: trixie
+      TERM: dumb
+    steps:
+      - name: Name the scratch tree
+        run: |
+          set -eu
+          # One scratch tree per run, attempt and call: two calls in one run,
+          # a build and a test, never share a container or a tree.
+          suffix=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
+          {
+            echo "SCRATCH=/var/tmp/keel-ci/keel-trixie-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$suffix"
+            echo "OUT=$RUNNER_TEMP/keel-trixie-out"
+            echo "XDG_RUNTIME_DIR=/run/user/$(id -u)"
+          } >> "$GITHUB_ENV"
+
+      # bin/lxc-trixie-inputs and bin/unprivileged-lxc, from main like the
+      # appliance gate's tooling (tooling_ref, profile/WORKFLOWS.md).
+      - name: Check out this workflow's tooling
+        uses: actions/checkout@v4
+        with:
+          repository: keel-linux/.github
+          ref: ${{ inputs.tooling_ref }}
+          path: .keel-ci
+          sparse-checkout: bin
+          persist-credentials: false
+
+      - name: Check the inputs
+        run: .keel-ci/bin/lxc-trixie-inputs
+
+      # No credentials stay in src/.git/config: the tree is copied into the
+      # container whole, and a directory of it may be uploaded.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+          path: src
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        if: inputs.download != ''
+        with:
+          name: ${{ inputs.download }}
+          path: src/${{ inputs.download-dir }}
+
+      - name: Create and start a trixie LXC container
+        run: |
+          set -euo pipefail
+          if [ -e "$SCRATCH" ]; then
+            .keel-ci/bin/unprivileged-lxc cleanup "$SCRATCH"
+          fi
+          mkdir -p "$SCRATCH/lxc"
+          chmod 0755 "$SCRATCH" "$SCRATCH/lxc"
+          lxc-create -P "$SCRATCH/lxc" -n "$NAME" -t download -- \
+            -d debian -r trixie -a amd64
+          systemd-run --user --scope --quiet -p Delegate=yes -- \
+            lxc-start -P "$SCRATCH/lxc" -n "$NAME"
+          lxc-wait -P "$SCRATCH/lxc" -n "$NAME" -s RUNNING -t 60
+
+      - name: Wait for systemd and the network
+        run: |
+          set -euo pipefail
+          ct() {
+            systemd-run --user --scope --quiet -- \
+              lxc-attach -P "$SCRATCH/lxc" -n "$NAME" --clear-env -- "$@"
+          }
+          state=
+          for _ in $(seq 90); do
+            state=$(ct systemctl is-system-running 2>/dev/null < /dev/null || true)
+            case "$state" in running|degraded) break ;; esac
+            sleep 2
+          done
+          echo "systemd: $state"
+          if [ "$SYSTEMD" = true ]; then
+            case "$state" in running|degraded) ;; *)
+              echo "::error::systemd in the container did not come up: $state"
+              ct systemctl --failed --no-pager < /dev/null || true
+              exit 1 ;;
+            esac
+          fi
+          for _ in $(seq 60); do
+            if ct getent ahosts deb.debian.org > /dev/null 2>&1 < /dev/null; then
+              echo "network: deb.debian.org resolves"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::the container has no network after two minutes"
+          exit 1
+
+      - name: Copy the repository and the commands in
+        run: |
+          set -euo pipefail
+          ct() {
+            systemd-run --user --scope --quiet -- \
+              lxc-attach -P "$SCRATCH/lxc" -n "$NAME" --clear-env -- "$@"
+          }
+          tar -C src -cf - . | ct sh -c 'mkdir -p /src && tar -C /src --no-same-owner -xf -'
+          if [ -n "$RUN" ]; then
+            printf '%s\n' "$RUN" | ct sh -c 'mkdir -p /root/.keel-ci && cat > /root/.keel-ci/run'
+          else
+            printf 'exec bash /src/%q\n' "$SCRIPT" \
+              | ct sh -c 'mkdir -p /root/.keel-ci && cat > /root/.keel-ci/run'
+          fi
+          if [ "$BACKPORTS" = true ]; then
+            echo 'deb http://deb.debian.org/debian trixie-backports main' \
+              | ct sh -c 'cat > /etc/apt/sources.list.d/trixie-backports.list'
+          fi
+
+      - name: Run the commands in the container
+        run: |
+          set -euo pipefail
+          systemd-run --user --scope --quiet -- \
+            lxc-attach -P "$SCRATCH/lxc" -n "$NAME" --clear-env -- \
+            env HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+                LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive CI=true WORKSPACE=/src \
+            sh -c 'cd /src && exec bash -euo pipefail /root/.keel-ci/run' < /dev/null
+
+      - name: Copy the artifact out
+        if: inputs.artifact-dir != ''
+        run: |
+          set -euo pipefail
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          systemd-run --user --scope --quiet -- \
+            lxc-attach -P "$SCRATCH/lxc" -n "$NAME" --clear-env -- \
+            tar -C "/src/$ARTIFACT_DIR" -cf - . < /dev/null | tar -C "$OUT" -xf -
+          find "$OUT" -type f -printf '%P  %s bytes\n' | sort | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.artifact-dir != ''
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ runner.temp }}/keel-trixie-out/
+          if-no-files-found: error
+
+      - name: Destroy the container and the scratch tree
+        if: always()
+        run: |
+          set -u
+          if [ -z "${SCRATCH-}" ]; then
+            echo "no scratch tree was named, so there is nothing to remove"
+            exit 0
+          fi
+          rm -rf "$OUT"
+          if [ -d "$SCRATCH/lxc" ]; then
+            lxc-stop -P "$SCRATCH/lxc" -n "$NAME" -k > /dev/null 2>&1 || true
+            lxc-destroy -P "$SCRATCH/lxc" -n "$NAME" -f > /dev/null 2>&1 || true
+          fi
+          # What lxc-destroy leaves belongs to the runner's subordinate ids,
+          # so it goes through the user namespace bin/unprivileged-lxc maps.
+          if [ -x .keel-ci/bin/unprivileged-lxc ]; then
+            .keel-ci/bin/unprivileged-lxc cleanup "$SCRATCH" || true
+          fi
+          if [ -e "$SCRATCH" ]; then
+            echo "::warning::$SCRATCH still exists after cleanup"
+          fi
+          left=$(pgrep -af 'lxc monitor' 2>/dev/null | grep -c "$SCRATCH" || true)
+          if [ "$left" != 0 ]; then
+            echo "::warning::$left container monitor(s) of this run survived cleanup"
+          fi
