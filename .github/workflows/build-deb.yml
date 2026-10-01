@@ -39,6 +39,14 @@ permissions:
 
 jobs:
   deb:
+    # Code from a fork never reaches keel-lxc-1, which shares its VM with
+    # keellinux.org; the approval policy for outside contributors is the
+    # first gate and this is the second. pull_request_target runs with the
+    # base repository's rights and is refused outright.
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, keel-lxc]
     timeout-minutes: 60
     env:
