@@ -240,7 +240,12 @@ unit tested in `tests/appliance-gate.bats` and measured by
   install what they need inside the container; nothing is installed on the
   runner. The job is skipped for pull requests from forks and for
   `pull_request_target`, so a fork pull request gets no build, lint or test
-  evidence from it. It replaces `build-deb.yml`, retired on 2026-10-01: it
+  evidence from it, and a `fork-not-run` job fails on a hosted runner in
+  exactly that case (see below), which is why a caller puts no `if:` of
+  its own on the calling job. The checkout keeps no credentials, so
+  nothing copied into the container or uploaded carries the job token, and
+  `artifact-dir` must name a directory below `/src`, never `/src` itself.
+  It replaces `build-deb.yml`, retired on 2026-10-01: it
   called `sudo apt-get` on the runner, had no callers, and the runner has
   had no sudo since that day.
 
@@ -303,7 +308,6 @@ on:
     branches: [keel/trixie]
 jobs:
   build:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
     with:
       backports: true
@@ -384,15 +388,17 @@ running on a rootfs that no longer exists.
 
 `keel-lxc-1` shares a VM with keellinux.org, so a job from a fork's pull
 request must not run there even after someone clicks "Approve and run".
-`boot-published-layer` (and the `keel-lxc` job of `build-deb.yml`) carries
+`boot-published-layer` (and the `trixie` job of `lxc-trixie.yml`) carries
 an `if:` that refuses `pull_request_target` and a `pull_request` whose head
 repository is not the repository itself. A job skipped that way reports
 success, and branch protection counts a skipped required check as passed,
 so on a fork's pull request `appliance / boot-published-layer` shows as
 skipped. To keep that from looking like a boot, the same workflow runs
 `appliance / fork-not-booted` on a hosted runner in exactly that case, and
-it fails with the reason. It blocks the merge only where it is a required
-check. To test a fork's change, push it to a branch of the repository.
+it fails with the reason; `lxc-trixie.yml` does the same with
+`<caller job> / fork-not-run`. It blocks the merge only where it is a
+required check. To test a fork's change, push it to a branch of the
+repository.
 
 Runner group 1 accepts only jobs from the reusable workflows of this
 repository at `refs/heads/main` (`restricted_to_workflows`), so a new

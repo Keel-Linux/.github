@@ -29,8 +29,15 @@
 # A pull request from a fork never reaches the self-hosted runner: the job is
 # skipped for pull_request events whose head is another repository and for
 # every pull_request_target event, whatever the caller says. A skipped job
-# reports success, so a fork pull request gets no evidence from it; callers
-# keep the same guard on their own jobs so that a reader sees it there too.
+# reports success, so the job fork-not-run fails on a hosted runner in
+# exactly that case, and the pull request carries a red
+# "<caller job> / fork-not-run" saying why. Callers therefore put no `if:`
+# of their own on the calling job: one would skip fork-not-run too.
+#
+# The checkouts keep no credentials (persist-credentials: false), because
+# the tree is copied into the container whole and a directory of it may be
+# uploaded; bin/lxc-trixie-inputs refuses an artifact-dir that names /src
+# itself.
 #
 # A caller job named "build" produces the status check "build / trixie".
 name: lxc-trixie
@@ -101,11 +108,38 @@ on:
         required: false
         type: number
         default: 60
+      tooling_ref:
+        description: >-
+          Ref of keel-linux/.github the job takes bin/lxc-trixie-inputs and
+          bin/unprivileged-lxc from. Every caller leaves it at main; it
+          exists for the manual check of a change to this workflow, as
+          test-appliance.yml's input of the same name does.
+        required: false
+        type: string
+        default: main
 
 permissions:
   contents: read
 
 jobs:
+  # A job skipped by its `if:` reports success, so on a pull request from a
+  # fork "<caller job> / trixie" would show as passed having run nothing.
+  # This job, on a hosted runner, fails in that case and only then, as
+  # test-appliance.yml's fork-not-booted does. To test a fork's change, push
+  # it to a branch of the repository itself.
+  fork-not-run:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse to run a fork's pull request on keel-lxc-1
+        run: |
+          echo "::error::pull requests from forks do not run on keel-lxc-1, so this build or test did not run; push the change to a branch of $GITHUB_REPOSITORY to run it"
+          exit 1
+
   trixie:
     if: >-
       github.event_name != 'pull_request_target' &&
@@ -124,20 +158,9 @@ jobs:
       NAME: trixie
       TERM: dumb
     steps:
-      - name: Check the inputs
+      - name: Name the scratch tree
         run: |
           set -eu
-          if [ -n "$RUN" ] && [ -n "$SCRIPT" ]; then
-            echo "::error::set run or script, not both"; exit 1
-          fi
-          if [ -z "$RUN" ] && [ -z "$SCRIPT" ]; then
-            echo "::error::set run or script"; exit 1
-          fi
-          for path in "$SCRIPT" "$DOWNLOAD_DIR" "$ARTIFACT_DIR"; do
-            case "$path" in
-              /*|*..*) echo "::error::'$path' must be a path inside the repository"; exit 1 ;;
-            esac
-          done
           # One scratch tree per run, attempt and call: two calls in one run,
           # a build and a test, never share a container or a tree.
           suffix=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
@@ -147,18 +170,27 @@ jobs:
             echo "XDG_RUNTIME_DIR=/run/user/$(id -u)"
           } >> "$GITHUB_ENV"
 
+      # bin/lxc-trixie-inputs and bin/unprivileged-lxc, from main like the
+      # appliance gate's tooling (tooling_ref, profile/WORKFLOWS.md).
+      - name: Check out this workflow's tooling
+        uses: actions/checkout@v4
+        with:
+          repository: keel-linux/.github
+          ref: ${{ inputs.tooling_ref }}
+          path: .keel-ci
+          sparse-checkout: bin
+          persist-credentials: false
+
+      - name: Check the inputs
+        run: .keel-ci/bin/lxc-trixie-inputs
+
+      # No credentials stay in src/.git/config: the tree is copied into the
+      # container whole, and a directory of it may be uploaded.
       - uses: actions/checkout@v4
         with:
           fetch-depth: ${{ inputs.fetch-depth }}
           path: src
-
-      - name: Check out bin/unprivileged-lxc
-        uses: actions/checkout@v4
-        with:
-          repository: keel-linux/.github
-          ref: main
-          path: .keel-ci
-          sparse-checkout: bin
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         if: inputs.download != ''
@@ -222,7 +254,7 @@ jobs:
           if [ -n "$RUN" ]; then
             printf '%s\n' "$RUN" | ct sh -c 'mkdir -p /root/.keel-ci && cat > /root/.keel-ci/run'
           else
-            printf 'exec bash "/src/%s"\n' "$SCRIPT" \
+            printf 'exec bash /src/%q\n' "$SCRIPT" \
               | ct sh -c 'mkdir -p /root/.keel-ci && cat > /root/.keel-ci/run'
           fi
           if [ "$BACKPORTS" = true ]; then

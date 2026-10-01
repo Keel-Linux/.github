@@ -1,0 +1,69 @@
+#!/bin/bash
+# lxc-trixie-inputs: check the inputs of lxc-trixie.yml before anything is
+# created or copied.
+#
+#   RUN=... SCRIPT=... DOWNLOAD_DIR=... ARTIFACT_DIR=... lxc-trixie-inputs
+#
+# Exactly one of RUN and SCRIPT is set. SCRIPT, DOWNLOAD_DIR and ARTIFACT_DIR
+# are paths inside the repository, which is /src in the container: relative,
+# no `..` component, letters, digits, `.`, `_`, `-` and `/` only.
+#
+# ARTIFACT_DIR may be empty, which uploads nothing, but it may never name
+# /src itself, in any spelling (`.`, `./`, `a/..`): /src holds the whole
+# checkout, .git included, and an artifact is readable by anyone who can
+# read the run. SCRIPT may not name /src either, since that is no script.
+# DOWNLOAD_DIR may, because putting an artifact's files at the top of /src
+# exposes nothing.
+#
+# Prints every finding as a GitHub error annotation and exits 1 when there
+# is one, 0 otherwise.
+set -euo pipefail
+
+errors=0
+
+lti_error() {
+    echo "::error::$*"
+    errors=$((errors + 1))
+}
+
+# lti_path NAME VALUE ALLOW_TOP: check one path input.
+lti_path() {
+    local name=$1 value=$2 allow_top=$3 part depth=0
+    local -a parts
+    if [[ $value == /* ]]; then
+        lti_error "$name '$value' must be relative to the repository"
+        return
+    fi
+    if [[ ! $value =~ ^[A-Za-z0-9._/-]*$ ]]; then
+        lti_error "$name '$value' may only hold letters, digits, '.', '_', '-' and '/'"
+        return
+    fi
+    IFS=/ read -r -a parts <<< "$value"
+    for part in "${parts[@]}"; do
+        case "$part" in
+            ''|.) continue ;;
+            ..)
+                lti_error "$name '$value' may not climb with '..'"
+                return ;;
+            *) depth=$((depth + 1)) ;;
+        esac
+    done
+    if [ "$depth" -eq 0 ] && [ "$allow_top" != yes ]; then
+        lti_error "$name '$value' names the top of the repository, not a path below it"
+    fi
+}
+
+if [ -n "${RUN-}" ] && [ -n "${SCRIPT-}" ]; then
+    lti_error "set run or script, not both"
+elif [ -z "${RUN-}" ] && [ -z "${SCRIPT-}" ]; then
+    lti_error "set run or script"
+fi
+if [ -n "${SCRIPT-}" ]; then
+    lti_path script "$SCRIPT" no
+fi
+lti_path download-dir "${DOWNLOAD_DIR-}" yes
+if [ -n "${ARTIFACT_DIR-}" ]; then
+    lti_path artifact-dir "$ARTIFACT_DIR" no
+fi
+
+[ "$errors" -eq 0 ]
