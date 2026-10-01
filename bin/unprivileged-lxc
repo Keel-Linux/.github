@@ -1,0 +1,249 @@
+#!/bin/bash
+# unprivileged-lxc: run an appliance's tests/boot-test.sh on keel-lxc-1
+# without root on the host.
+#
+#   unprivileged-lxc run SCRATCH -- COMMAND [ARGS...]
+#   unprivileged-lxc cleanup SCRATCH
+#
+# Every appliance repository carries its own tests/boot-test.sh, nine of
+# them on 2026-10-01 and no two alike, and every one of them refuses to run
+# unless it is root: it assembles the layer chain with keel assemble, writes
+# into the rootfs and starts the container itself. Until 2026-10-01 the
+# runner reached root for that through sudo, which made any job on the
+# runner root on the public services VM it shares with keellinux.org.
+#
+# `run` gives COMMAND a root it can have without the host's: a user
+# namespace (lxc-usernsexec) in which uid 0 is the first id of the runner's
+# subordinate range, the same range the container's lxc.idmap uses, so
+# every file the assemble writes has the owner the container will see.
+# The runner's own uid is mapped in as well, at ULX_IDS, so the job's
+# workspace and scratch tree stay writable from inside.
+#
+# Root in that namespace cannot create a veth on the host bridge or move a
+# process into the container's cgroup. The LXC commands of COMMAND are
+# therefore links to this script that forward their arguments, and stdin
+# for lxc-attach, to a broker this script starts outside the namespace, as
+# the runner, which runs the real command as an unprivileged LXC user would:
+# lxc-start with the idmap and an AppArmor profile an unprivileged user may
+# apply, under a delegated systemd user scope; lxc-attach under a scope of
+# the same user manager, so the attach may enter the container's cgroup.
+# The broker runs with the runner's own rights and nothing more, so it is
+# a convenience, not a privilege boundary.
+#
+# `tar` is a link too. Device nodes cannot be created in a user namespace,
+# and a layer carries a few under /dev (null, zero, random, tty...). LXC
+# mounts its own /dev over the rootfs when it starts the container, so
+# those nodes are never seen. The link runs the real tar and forgives
+# exactly that refusal, counting the nodes it skipped; any other error, or
+# that one mixed with any other, fails as before.
+#
+# `cleanup` stops the broker and removes SCRATCH, which holds files owned
+# by the subordinate range, through the same namespace.
+set -euo pipefail
+shopt -s inherit_errexit
+
+ULX_IDS=65536
+ULX_PROFILE=lxc-container-default-with-nesting
+ULX_FORWARDED="lxc-attach lxc-destroy lxc-info lxc-ls lxc-start lxc-stop lxc-wait"
+ULX_POLL=${ULX_POLL:-0.1}
+ULX_TAR=${ULX_TAR:-/usr/bin/tar}
+ULX_SUBUID=${ULX_SUBUID:-/etc/subuid}
+ULX_SUBGID=${ULX_SUBGID:-/etc/subgid}
+# awk programs, single quoted so the shell leaves their fields alone.
+# shellcheck disable=SC2016
+ULX_RANGE='$1 == user && $3 >= need { print $2; exit }'
+# tar names itself by argv[0], so the lines start with tar: or /usr/bin/tar:.
+ULX_MKNOD='^[^ ]*tar: .*: Cannot mknod: Operation not permitted$'
+ULX_TAR_END='^[^ ]*tar: Exiting with failure status due to previous errors$'
+# shellcheck disable=SC2016
+ULX_MKNOD_ONLY='$0 ~ mknod { n++; next } $0 !~ end { other = 1 } END { print n + 0; exit (other || n == 0) }'
+
+ulx_die() {
+    echo "unprivileged-lxc: $*" >&2
+    exit 2
+}
+
+# ulx_subid FILE: the start of this user's first subordinate range in FILE,
+# when it holds at least ULX_IDS ids.
+ulx_subid() {
+    local user start
+    user=$(id -un)
+    start=$(awk -F: -v user="$user" -v need="$ULX_IDS" "$ULX_RANGE" "$1")
+    [ -n "$start" ] || ulx_die "$1 has no range of $ULX_IDS ids for $user"
+    printf '%s\n' "$start"
+}
+
+# ulx_maps: the lxc-usernsexec mappings, the subordinate range at 0 and this
+# user at ULX_IDS.
+ulx_maps() {
+    local uid gid
+    uid=$(ulx_subid "$ULX_SUBUID")
+    gid=$(ulx_subid "$ULX_SUBGID")
+    printf '%s\n' -m "u:0:$uid:$ULX_IDS" -m "g:0:$gid:$ULX_IDS" \
+        -m "u:$ULX_IDS:$(id -u):1" -m "g:$ULX_IDS:$(id -g):1"
+}
+
+# ulx_defines: what lxc-start is given on top of the config the boot test
+# wrote, which was written for a privileged container.
+ulx_defines() {
+    local uid gid
+    uid=$(ulx_subid "$ULX_SUBUID")
+    gid=$(ulx_subid "$ULX_SUBGID")
+    printf '%s\n' -s lxc.include=/usr/share/lxc/config/userns.conf \
+        -s "lxc.idmap=u 0 $uid $ULX_IDS" -s "lxc.idmap=g 0 $gid $ULX_IDS" \
+        -s "lxc.apparmor.profile=$ULX_PROFILE" -s lxc.apparmor.allow_nesting=0
+}
+
+ulx_scratch() {
+    [[ ${1-} == /* ]] || ulx_die "SCRATCH must be an absolute path, not '${1-}'"
+    case "$1" in
+        *..*|/) ulx_die "refusing SCRATCH '$1'" ;;
+    esac
+}
+
+# --- outside the namespace --------------------------------------------
+
+ulx_run() {
+    local scratch=$1 dir self command rc=0 maps
+    shift
+    [ "${1-}" = -- ] && shift
+    [ $# -gt 0 ] || ulx_die "run needs a command after --"
+    dir=$scratch/userns
+    self=$(readlink -f "${BASH_SOURCE[0]}")
+    mkdir -p "$dir/bin" "$dir/requests"
+    for command in $ULX_FORWARDED tar; do
+        ln -sfn "$self" "$dir/bin/$command"
+    done
+    rm -f "$dir/fifo"
+    mkfifo -m 0600 "$dir/fifo"
+    export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+    # Through a variable, not < <(...): a process substitution that fails
+    # leaves the array empty and set -e none the wiser.
+    maps=$(ulx_maps)
+    mapfile -t maps <<< "$maps"
+    "$self" broker "$scratch" &
+    echo "$!" > "$dir/broker.pid"
+    ULX_DIR=$dir ULX_BROKER=$! PATH="$dir/bin:$PATH" \
+        lxc-usernsexec "${maps[@]}" -- "$@" || rc=$?
+    ulx_stop_broker "$dir"
+    return "$rc"
+}
+
+ulx_stop_broker() {
+    local pid
+    [ -r "$1/broker.pid" ] || return 0
+    pid=$(cat "$1/broker.pid")
+    kill "$pid" 2>/dev/null || true
+    rm -f "$1/broker.pid"
+}
+
+ulx_broker() {
+    local dir=$1/userns id
+    exec 3<>"$dir/fifo"
+    while IFS= read -r id <&3; do
+        case "$id" in
+            ''|*[!A-Za-z0-9]*) echo "unprivileged-lxc: ignoring request '$id'" >&2 ;;
+            *) ulx_serve "$dir/requests/$id" & ;;
+        esac
+    done
+}
+
+ulx_serve() {
+    local request=$1 command input=/dev/null rc=0 defines
+    local -a argv
+    mapfile -d '' -t argv < "$request/argv"
+    command=${argv[0]}
+    [ -e "$request/in" ] && input=$request/in
+    [[ " $ULX_FORWARDED " == *" $command "* ]] || command=""
+    case "$command" in
+        lxc-start)
+            defines=$(ulx_defines)
+            mapfile -t defines <<< "$defines"
+            systemd-run --user --scope --quiet -p Delegate=yes -- \
+                lxc-start "${defines[@]}" "${argv[@]:1}" ;;
+        lxc-attach)
+            systemd-run --user --scope --quiet -- "${argv[@]}" ;;
+        '')
+            echo "unprivileged-lxc: ${argv[0]} is not forwarded" >&2
+            false ;;
+        *)
+            "${argv[@]}" ;;
+    esac < "$input" > "$request/out" 2> "$request/err" || rc=$?
+    echo "$rc" > "$request/rc.tmp"
+    mv "$request/rc.tmp" "$request/rc"
+}
+
+ulx_cleanup() {
+    local scratch=$1 maps
+    ulx_stop_broker "$scratch/userns"
+    [ -e "$scratch" ] || return 0
+    maps=$(ulx_maps)
+    mapfile -t maps <<< "$maps"
+    lxc-usernsexec "${maps[@]}" -- rm -rf -- "$scratch"
+}
+
+# --- inside the namespace ---------------------------------------------
+
+ulx_client() {
+    local name=$1 request rc
+    shift
+    if [ -z "${ULX_DIR-}" ] || [ -z "${ULX_BROKER-}" ]; then
+        ulx_die "$name: not under 'unprivileged-lxc run'"
+    fi
+    request=$(mktemp -d "$ULX_DIR/requests/XXXXXXXX")
+    printf '%s\0' "$name" "$@" > "$request/argv"
+    if [ "$name" = lxc-attach ] && { [ -p /dev/stdin ] || [ -f /dev/stdin ]; }; then
+        cat > "$request/in"
+    fi
+    chown -R "${ULX_OWNER:-$ULX_IDS:$ULX_IDS}" "$request"
+    echo "${request##*/}" > "$ULX_DIR/fifo"
+    until [ -e "$request/rc" ]; do
+        [ -d "/proc/$ULX_BROKER" ] || ulx_die "$name: the broker has gone away"
+        sleep "$ULX_POLL"
+    done
+    cat "$request/out"
+    cat "$request/err" >&2
+    rc=$(cat "$request/rc")
+    rm -rf "$request"
+    return "$rc"
+}
+
+# ulx_mknod_only: stdin is tar's stderr; true when every complaint in it is
+# a device node the namespace may not create. Prints how many.
+ulx_mknod_only() {
+    awk -v mknod="$ULX_MKNOD" -v end="$ULX_TAR_END" "$ULX_MKNOD_ONLY"
+}
+
+ulx_tar() {
+    local err rc=0 skipped
+    err=$(mktemp)
+    "$ULX_TAR" "$@" 2> "$err" || rc=$?
+    if [ "$rc" -eq 2 ] && skipped=$(ulx_mknod_only < "$err"); then
+        echo "unprivileged-lxc: tar skipped $skipped device nodes; LXC mounts its own /dev" >&2
+        rc=0
+    else
+        cat "$err" >&2
+    fi
+    rm -f "$err"
+    return "$rc"
+}
+
+ulx_main() {
+    local name
+    name=$(basename "$0")
+    case "$name" in
+        tar) ulx_tar "$@"; return ;;
+        lxc-*) ulx_client "$name" "$@"; return ;;
+    esac
+    case "${1-}" in
+        run|cleanup|broker)
+            ulx_scratch "${2-}"
+            "ulx_$1" "${@:2}" ;;
+        *)
+            echo "usage: unprivileged-lxc run SCRATCH -- COMMAND [ARGS...]" >&2
+            echo "       unprivileged-lxc cleanup SCRATCH" >&2
+            return 2 ;;
+    esac
+}
+
+ulx_main "$@"
