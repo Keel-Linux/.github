@@ -16,7 +16,7 @@ GitHub names the check after the caller's job id and the reusable job id:
 | `test-python.yml` | `coverage` | `tests / coverage` |
 | `test-shell.yml` | `coverage` | `tests / coverage` |
 | `test-appliance.yml` | `boot-published-layer` | `appliance / boot-published-layer` (caller job id `appliance`) |
-| `build-deb.yml` | `deb` | `package / deb` (caller job id `package`) |
+| `lxc-trixie.yml` | `trixie` | `build / trixie` (caller job id `build`) |
 
 Renaming a caller job renames the check, so keep the job id `tests`. Renaming
 a reusable job renames it for every caller at once: `build-and-boot` became
@@ -224,16 +224,25 @@ unit tested in `tests/appliance-gate.bats` and measured by
   requiring it for merge. An answer that is neither 200 nor 404, including a
   name that does not resolve, fails the job: reading an outage as "not
   published" would be a green check that tested nothing.
-- `build-deb.yml`: `dpkg-buildpackage -us -uc -b` on the self-hosted LXC
-  runner, the `.deb` uploaded as a workflow artifact (input `artifact-name`,
-  default `deb`; `source-dir`; `retention-days`). Inactive until the runner
-  is registered: a job targeting the `keel-lxc` label stays queued until
-  GitHub cancels it after 24 hours, so callers gate it on the organization
-  variable `KEEL_LXC_RUNNER` (`if: vars.KEEL_LXC_RUNNER == 'true'`), which
-  the maintainer sets to `true` once the runner is online. It still calls
-  `sudo apt-get` for the build dependencies, and the runner has had no sudo
-  since 2026-10-01, so it has to move into an unprivileged container (the
-  way `test-appliance.yml` boots one) before anything calls it.
+- `lxc-trixie.yml`: runs the caller's commands (input `run`) or a script
+  of the repository (input `script`) as root in `/src` of a Debian trixie
+  system container: an unprivileged LXC container with its own systemd,
+  created from the download template, started and destroyed by the runner
+  user on the self-hosted runner, with no sudo, as `bin/unprivileged-lxc`
+  starts the appliance gate's containers. It is how a job gets trixie in
+  this organization, which runs no application containers: no
+  `container:` job key, no service images, no Docker or podman. Inputs:
+  `systemd` (wait until systemd is running or degraded, for tests that
+  drive units), `backports` (enable trixie-backports), `fetch-depth` (0 for
+  gbp), `download` and `download-dir` (an artifact of the run put in
+  `/src/<download-dir>`), `artifact-dir` and `artifact-name` (a directory
+  of `/src` uploaded after the commands succeed), `timeout`. The commands
+  install what they need inside the container; nothing is installed on the
+  runner. The job is skipped for pull requests from forks and for
+  `pull_request_target`, so a fork pull request gets no build, lint or test
+  evidence from it. It replaces `build-deb.yml`, retired on 2026-10-01: it
+  called `sudo apt-get` on the runner, had no callers, and the runner has
+  had no sudo since that day.
 
 ## Example callers
 
@@ -283,17 +292,29 @@ caller:
       parent: nodejs-nginx
 ```
 
-Debian package, added once the runner exists:
+Debian package (anubis, libcoraza, keel-core): build and lint in a trixie
+system container, gbp with backports here.
 
 ```yaml
 name: package
 on:
+  pull_request:
   push:
-    tags: ['v*']
+    branches: [keel/trixie]
 jobs:
-  package:
-    if: vars.KEEL_LXC_RUNNER == 'true'
-    uses: keel-linux/.github/.github/workflows/build-deb.yml@main
+  build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: keel-linux/.github/.github/workflows/lxc-trixie.yml@main
+    with:
+      backports: true
+      fetch-depth: 0
+      artifact-dir: dist
+      artifact-name: debs
+      run: |
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends git git-buildpackage devscripts equivs lintian
+        (cd /tmp && mk-build-deps --install --remove --tool 'apt-get -y -qq --no-install-recommends' /src/debian/control)
+        gbp buildpackage --git-ignore-branch --git-builder='dpkg-buildpackage -us -uc'
 ```
 
 ## Several nodes in the appliance gate
