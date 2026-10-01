@@ -137,7 +137,36 @@ permissions:
   contents: read
 
 jobs:
+  # A job skipped by its `if:` reports success, and branch protection counts
+  # a skipped required check as passed. So on a pull request from a fork
+  # "appliance / boot-published-layer" shows as skipped and would let the
+  # pull request through having booted nothing. This job, on a hosted
+  # runner, fails in that case and only then, so the pull request carries a
+  # red "appliance / fork-not-booted" that says why. It blocks a merge only
+  # where it is a required check; the way to test a fork's change is to push
+  # it to a branch of the repository itself.
+  fork-not-booted:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name != github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse to boot a fork's pull request on keel-lxc-1
+        run: |
+          echo "::error::pull requests from forks are not booted on keel-lxc-1; push the change to a branch of $GITHUB_REPOSITORY to run the appliance gate"
+          exit 1
+
   boot-published-layer:
+    # Code from a fork never reaches keel-lxc-1, which shares its VM with
+    # keellinux.org; the approval policy for outside contributors is the
+    # first gate and this is the second. pull_request_target runs with the
+    # base repository's rights and is refused outright.
+    if: >-
+      github.event_name != 'pull_request_target' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, keel-lxc]
     timeout-minutes: ${{ inputs.timeout }}
     env:
@@ -162,6 +191,14 @@ jobs:
       SCRATCH: /var/tmp/keel-ci/keel-${{ inputs.appliance }}-ci-${{ github.run_id }}-${{ github.run_attempt }}
       TERM: dumb
     steps:
+      # The name ends up in paths, container names and the mirror URL.
+      - name: Check the appliance name
+        run: |
+          if [[ ! $APPLIANCE =~ ^[a-z0-9-]+$ ]]; then
+            echo "::error::appliance '$APPLIANCE' is not a name: lower case letters, digits and dashes only"
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
 
       # The gate's own tooling: bin/appliance-gate, which decides what this
@@ -278,9 +315,11 @@ jobs:
 
       - name: Check the published parent against the caller
         if: steps.layer.outputs.published == 'true'
+        env:
+          MANIFEST: ${{ steps.layer.outputs.manifest }}
         run: |
           set -eu
-          published=$(awk '$1 == "parent" { print $2 }' "${{ steps.layer.outputs.manifest }}")
+          published=$(awk '$1 == "parent" { print $2 }' "$MANIFEST")
           declared=${PARENT:-none}
           echo "manifest says parent $published, the caller declares $declared"
           if [ "$published" != "$declared" ]; then

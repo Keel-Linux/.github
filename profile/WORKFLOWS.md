@@ -380,6 +380,25 @@ scratch tree last, because removing the tree first would delete the
 configuration of the nodes not stopped yet and leave their init processes
 running on a rootfs that no longer exists.
 
+### Forks never reach the runner
+
+`keel-lxc-1` shares a VM with keellinux.org, so a job from a fork's pull
+request must not run there even after someone clicks "Approve and run".
+`boot-published-layer` (and the `keel-lxc` job of `build-deb.yml`) carries
+an `if:` that refuses `pull_request_target` and a `pull_request` whose head
+repository is not the repository itself. A job skipped that way reports
+success, and branch protection counts a skipped required check as passed,
+so on a fork's pull request `appliance / boot-published-layer` shows as
+skipped. To keep that from looking like a boot, the same workflow runs
+`appliance / fork-not-booted` on a hosted runner in exactly that case, and
+it fails with the reason. It blocks the merge only where it is a required
+check. To test a fork's change, push it to a branch of the repository.
+
+Runner group 1 accepts only jobs from the reusable workflows of this
+repository at `refs/heads/main` (`restricted_to_workflows`), so a new
+reusable workflow that targets `keel-lxc` gets the runner only once it is
+added to that list (docs/ci-cd.md section 6 of the handbook).
+
 ### Without root on the runner
 
 Every appliance's `tests/boot-test.sh` insists on being root: it assembles
