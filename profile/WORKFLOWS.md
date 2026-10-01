@@ -230,8 +230,10 @@ unit tested in `tests/appliance-gate.bats` and measured by
   is registered: a job targeting the `keel-lxc` label stays queued until
   GitHub cancels it after 24 hours, so callers gate it on the organization
   variable `KEEL_LXC_RUNNER` (`if: vars.KEEL_LXC_RUNNER == 'true'`), which
-  the maintainer sets to `true` once the runner is online. The runner needs
-  passwordless sudo for `apt-get` (build dependencies).
+  the maintainer sets to `true` once the runner is online. It still calls
+  `sudo apt-get` for the build dependencies, and the runner has had no sudo
+  since 2026-10-01, so it has to move into an unprivileged container (the
+  way `test-appliance.yml` boots one) before anything calls it.
 
 ## Example callers
 
@@ -353,11 +355,32 @@ Teardown runs whatever the outcome, cancellation included, because the step's
 condition is `always()`. It enumerates the containers from LXC rather than
 recomputing them from the role list, so a node the test renamed or started
 just before failing goes too. It stops all of them first and removes the
-scratch tree last: `keel-ci-cleanup` stops one container and deletes the tree
-in a single call, so calling it once per node would delete the configuration
-of the nodes not stopped yet and leave their init processes running on a
-rootfs that no longer exists. `lxc-stop` and `lxc-destroy` are already in the
-runner's sudo policy, so several nodes need it no wider than one node did.
+scratch tree last, because removing the tree first would delete the
+configuration of the nodes not stopped yet and leave their init processes
+running on a rootfs that no longer exists.
+
+### Without root on the runner
+
+Every appliance's `tests/boot-test.sh` insists on being root: it assembles
+the rootfs with `keel assemble` and starts the container itself. Since
+2026-10-01 the runner has no sudo, so the job runs the test through
+`bin/unprivileged-lxc run`, unit tested in `tests/unprivileged-lxc.bats`.
+The test is root in a user namespace (`lxc-usernsexec`) whose uid 0 is the
+first id of the runner's subordinate range, the range the container's
+`lxc.idmap` uses, so what the assemble writes has the owners the container
+sees; the runner's own uid is mapped in at 65536 so the workspace stays
+writable. Root there cannot put a veth on the host bridge or enter a
+container's cgroup, so the test's `lxc-*` commands are links to the same
+script that forward to a broker running outside the namespace as the
+runner: `lxc-start` gets the idmap, `userns.conf` and the AppArmor profile
+`lxc-container-default-with-nesting` on top of the config the test wrote,
+inside a delegated `systemd-run --user --scope`; `lxc-attach` runs in a
+scope of the same user manager and gets the stdin the test piped to it. The
+broker has the runner's rights and no more. `tar` is a link too, because a
+user namespace may not create device nodes: it forgives exactly that
+refusal and nothing mixed with it, and LXC mounts its own `/dev` over the
+rootfs anyway. `unprivileged-lxc cleanup` removes the scratch tree through
+the same namespace. No appliance repository had to change.
 
 ## The site (keel-linux.github.io)
 

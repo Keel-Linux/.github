@@ -152,6 +152,7 @@ jobs:
       TOOLING_REF: ${{ inputs.tooling_ref }}
       SOURCE: https://mirror.keellinux.org/layers
       GATE: ${{ github.workspace }}/.keel-ci/bin/appliance-gate
+      UNPRIVILEGED_LXC: ${{ github.workspace }}/.keel-ci/bin/unprivileged-lxc
       NODES_LIB: ${{ github.workspace }}/.keel-ci/lib/boot-test-nodes.sh
       # One scratch tree per run and per attempt, so two runs never share a
       # rootfs or a layer cache. NAME is the container name with one node
@@ -327,20 +328,23 @@ jobs:
             nodes=(--roles "$ROLES" --nodes-lib "$NODES_LIB"
                    --nodes-report "$SCRATCH/nodes")
           fi
-          # Assembling a rootfs and starting a container need root. The
-          # runner user has no blanket sudo: keel-ci-boot-test is a
-          # root-owned entry point that checks its arguments and runs this
-          # repository's boot test with the keel checkout of this job first
-          # in PATH (docs/releases-host.md, the CI runner).
-          sudo -n /usr/local/sbin/keel-ci-boot-test \
-            "$GITHUB_WORKSPACE" "$SCRATCH" "$APPLIANCE" \
+          # The boot test insists on root, to assemble the rootfs and start
+          # the container. The runner has no sudo since 2026-10-01: the test
+          # is root in a user namespace mapped onto the runner's subordinate
+          # ids, which are the ids the container runs as, and its LXC
+          # commands reach unprivileged LXC through bin/unprivileged-lxc of
+          # this repository (docs/ci-cd.md section 6 of the keel
+          # repository). stdin is /dev/null so that a forwarded lxc-attach
+          # only ever reads what the test pipes into it.
+          "$UNPRIVILEGED_LXC" run "$SCRATCH" -- \
+            "$GITHUB_WORKSPACE/tests/boot-test.sh" "$APPLIANCE" \
             --name "$NAME" \
             --layers-dir "$SOURCE" \
             --cache-dir "$SCRATCH/cache" \
             --lxc-path "$SCRATCH/lxc" \
             --bridge lxcbr0 \
             --timeout 900 --interval 5 \
-            "${nodes[@]+"${nodes[@]}"}"
+            "${nodes[@]+"${nodes[@]}"}" < /dev/null
 
       - name: Summary
         if: steps.layer.outputs.published == 'true'
@@ -396,23 +400,27 @@ jobs:
           # The containers are enumerated from LXC rather than recomputed
           # from the role list, so a node the test added, renamed or started
           # before it failed is torn down too, and so this step needs no
-          # agreement with the test about how many there were. Stopping comes
-          # first and removing the tree last: keel-ci-cleanup does both in
-          # one call, and calling it per node would delete the tree holding
-          # the configuration of the nodes not stopped yet, leaving their
-          # init processes running on a rootfs that no longer exists. Both
-          # lxc-stop and lxc-destroy are in the runner's sudo policy
-          # already, so nothing here needs it widened.
+          # agreement with the test about how many there were. Every node is
+          # stopped before the tree goes: removing it first would delete the
+          # configuration of the nodes not stopped yet, leaving their init
+          # processes running on a rootfs that no longer exists. The
+          # containers are the runner's own unprivileged ones, so it stops
+          # them without sudo.
           if [ -d "$SCRATCH/lxc" ]; then
-            for container in $(sudo -n /usr/bin/lxc-ls -P "$SCRATCH/lxc" -1 2>/dev/null || true); do
-              echo "stopping and destroying $container"
-              sudo -n /usr/bin/lxc-stop -P "$SCRATCH/lxc" -n "$container" -k >/dev/null 2>&1 || true
-              sudo -n /usr/bin/lxc-destroy -P "$SCRATCH/lxc" -n "$container" -f >/dev/null 2>&1 || true
+            for container in $(lxc-ls -P "$SCRATCH/lxc" -1 2>/dev/null || true); do
+              echo "stopping $container"
+              lxc-stop -P "$SCRATCH/lxc" -n "$container" -k >/dev/null 2>&1 || true
             done
           fi
           # Removes the scratch tree: the layer cache, every rootfs and the
-          # topology report. Safe to run twice, which is what it is for.
-          sudo -n /usr/local/sbin/keel-ci-cleanup "$NAME" "$SCRATCH" || true
+          # topology report. The rootfs belongs to the runner's subordinate
+          # ids, so the removal happens in the same user namespace the
+          # assemble did. Safe to run twice, which is what it is for.
+          if [ -x "$UNPRIVILEGED_LXC" ]; then
+            "$UNPRIVILEGED_LXC" cleanup "$SCRATCH" || true
+          else
+            echo "::warning::$UNPRIVILEGED_LXC is missing, $SCRATCH cannot be removed here"
+          fi
           rm -f "$SCRATCH-manifest"
           if [ -e "$SCRATCH" ]; then
             echo "::warning::$SCRATCH still exists after cleanup"
