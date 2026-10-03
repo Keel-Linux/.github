@@ -4,11 +4,11 @@
 # What this job proves, and what it does not. It fetches the layer from the
 # project mirror, verifies it, assembles the chain into one or more scratch
 # rootfs trees, boots them in LXC containers on one bridge and runs the
-# repository's boot test. Every byte it touches was built and published
-# before the run started, so what it proves is that the published layer
-# boots. It is not evidence about the branch: on a pull request that changes
-# the recipe, the layer on the mirror is the one built from the default
-# branch, so the change is never exercised here. The job id says as much,
+# repository's boot test, after upgrading each rootfs (below). The layer was
+# built and published before the run started, so what it proves is that the
+# published layer, brought up to date, boots. It is not evidence about the
+# recipe: on a pull request that changes it, the layer on the mirror is the
+# one built from the default branch, so the change is never exercised here. The job id says as much,
 # because until 2026-09-28 it was `build-and-boot`, and a name that reads
 # like "this branch was built and booted" was taken for exactly that when
 # branch protection was applied. Nothing here builds a layer.
@@ -16,6 +16,25 @@
 # The value it does have is real and worth keeping: it catches a published
 # layer that no longer boots, and it catches the parent mismatch it was
 # written for.
+#
+# What boots is not the published layer exactly as it was published. The
+# first time the boot test starts a container, bin/unprivileged-lxc boots it
+# once with the first boot units masked and runs bin/upgrade-rootfs inside
+# it, confined like the appliance itself (its own idmap, the same AppArmor
+# profile, nothing of it on the runner), then stops it and starts it as the
+# test asked: apt-get full-upgrade from deb.debian.org and
+# archive.keellinux.org trixie-testing (fetched by the runner, which the
+# containers cannot reach, and checked by apt inside), then, when the
+# caller names one with `package_artifact`, the .deb files this run built
+# from the pull request. So the boot tests "published layer + current
+# testing + this pull request's package", which is what an operator has
+# after `apt upgrade`. Until 2026-10-03 it booted the layer untouched, and a
+# published layer whose first boot was broken failed every pull request,
+# the one carrying the fix included, so the check had to be lifted by hand
+# (tracker#53; keel-core#24, keel-web#4). The versions that differ from the
+# published layer are in the job log and the job summary, written before
+# the boot, so a failure says what was booted. The recipe is still not
+# built: a change to it is not exercised here.
 #
 # A layer that has never been published fails this job. Before 2026-09-28 it
 # passed with a notice, and a notice is not a conclusion: branch protection
@@ -127,6 +146,19 @@ on:
         required: false
         type: string
         default: main
+      package_artifact:
+        description: >-
+          Name of an artifact of this workflow run holding the .deb files
+          built from the pull request, as lxc-trixie.yml uploads them with
+          artifact-name. They are installed over the upgraded rootfs before
+          the first boot, at their own version even when the archive has a
+          newer one. An artifact is only visible inside the run that
+          uploaded it, so the calling job sits in the same workflow as the
+          build and `needs:` it. Empty, the default, installs nothing of the
+          pull request's own.
+        required: false
+        type: string
+        default: ""
       timeout:
         description: minutes before the job is cancelled
         required: false
@@ -179,6 +211,7 @@ jobs:
       # this job may claim is held to the same standard as
       # allow_unpublished: it does not get to be invisible.
       TOOLING_REF: ${{ inputs.tooling_ref }}
+      PACKAGE_ARTIFACT: ${{ inputs.package_artifact }}
       SOURCE: https://mirror.keellinux.org/layers
       GATE: ${{ github.workspace }}/.keel-ci/bin/appliance-gate
       UNPRIVILEGED_LXC: ${{ github.workspace }}/.keel-ci/bin/unprivileged-lxc
@@ -200,7 +233,11 @@ jobs:
             exit 1
           fi
 
+      # No credentials stay in .git/config: the boot test runs as root in a
+      # user namespace that can read the whole workspace.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # The gate's own tooling: bin/appliance-gate, which decides what this
       # job may claim from the mirror's answer, and lib/boot-test-nodes.sh,
@@ -224,6 +261,7 @@ jobs:
           repository: keel-linux/.github
           ref: ${{ inputs.tooling_ref }}
           path: .keel-ci
+          persist-credentials: false
 
       - name: Record where the gate's logic came from
         run: |
@@ -350,7 +388,28 @@ jobs:
             *) echo "::error::keel verify exited $code"; exit "$code" ;;
           esac
 
-      - name: Assemble and boot the published layer, then run the appliance's boot test
+      # The pull request's packages, which bin/upgrade-rootfs installs in
+      # the container after the upgrade. bin/unprivileged-lxc reads them from ULX_DEBS.
+      - uses: actions/download-artifact@v4
+        if: steps.layer.outputs.published == 'true' && inputs.package_artifact != ''
+        with:
+          name: ${{ inputs.package_artifact }}
+          path: .keel-ci-debs
+
+      - name: Hand the pull request's packages to the upgrade
+        if: steps.layer.outputs.published == 'true' && inputs.package_artifact != ''
+        run: |
+          set -eu
+          debs=$(find .keel-ci-debs -maxdepth 1 -name '*.deb' -type f -printf '%f\n' | sort)
+          if [ -z "$debs" ]; then
+            echo "::error::the artifact $PACKAGE_ARTIFACT holds no .deb file"
+            exit 1
+          fi
+          echo "installed after the upgrade, from $PACKAGE_ARTIFACT:"
+          echo "$debs"
+          echo "ULX_DEBS=$GITHUB_WORKSPACE/.keel-ci-debs" >> "$GITHUB_ENV"
+
+      - name: Upgrade and boot the published layer, then run the appliance's boot test
         if: steps.layer.outputs.published == 'true'
         run: |
           set -eu
@@ -374,8 +433,10 @@ jobs:
           # ids, which are the ids the container runs as, and its LXC
           # commands reach unprivileged LXC through bin/unprivileged-lxc of
           # this repository (docs/ci-cd.md section 6 of the keel
-          # repository). stdin is /dev/null so that a forwarded lxc-attach
-          # only ever reads what the test pipes into it.
+          # repository). Its first lxc-start of a container is preceded by
+          # the upgrade boot (header of this file). stdin is /dev/null so
+          # that a forwarded lxc-attach only ever reads what the test pipes
+          # into it.
           "$UNPRIVILEGED_LXC" run "$SCRATCH" -- \
             "$GITHUB_WORKSPACE/tests/boot-test.sh" "$APPLIANCE" \
             --name "$NAME" \
@@ -399,7 +460,7 @@ jobs:
           built=$(awk '$1 == "product_commit" { print $2 }' "$MANIFEST")
           pool=$(awk '$1 == "pool" { print $2 }' "$MANIFEST")
           {
-            echo "## The published $APPLIANCE layer booted"
+            echo "## The published $APPLIANCE layer booted, upgraded"
             echo
             echo "| Item | Value |"
             echo "| --- | --- |"
@@ -407,13 +468,17 @@ jobs:
             echo "| parent | \`${PARENT:-none}\` |"
             echo "| source | \`$SOURCE\` |"
             echo "| built from | \`${built:-unrecorded}\`, pool \`${pool:-unrecorded}\` |"
+            echo "| upgraded from | Debian trixie, archive.keellinux.org trixie-testing |"
+            echo "| pull request's packages | \`${PACKAGE_ARTIFACT:-none}\` |"
             echo "| nodes | \`${ROLES:-one}\` |"
             echo "| container | \`$NAME\` |"
             echo "| keel | \`$KEEL_COMMIT\` |"
             echo
             echo "This booted the layer the mirror publishes, built before this"
-            echo "run. It says nothing about the commit under test: no step here"
-            echo "builds from the branch."
+            echo "run, upgraded from the archives and with the pull request's"
+            echo "packages when the row above names an artifact; the versions"
+            echo "that changed are listed above. The recipe was not built: a"
+            echo "change to it is not exercised here."
           } >> "$GITHUB_STEP_SUMMARY"
           # The topology comes from the boot test, which is the only thing
           # that knows the addresses the bridge handed out, and is rendered

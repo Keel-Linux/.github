@@ -87,6 +87,77 @@ summary repeats it in as many words, with the `product_commit` and pool date
 the booted layer was built from, so a reviewer can see how old the thing that
 booted is.
 
+### What boots: the published layer, upgraded
+
+Since 2026-10-03 the layer is not booted as it was published. The first time
+the boot test starts a container, the broker of `bin/unprivileged-lxc` boots
+it once with the first boot masked on the init command line
+(`systemd.mask=` for inithooks, keel-host-keys, turnkey-init-fence and
+systemd-machine-id-commit, checked as `masked-runtime` before anything runs),
+feeds `bin/upgrade-rootfs` to `bash -s` inside it through `lxc-attach`, stops
+it, and then starts it as the test asked. Inside, `apt-get full-upgrade` runs
+from deb.debian.org and from archive.keellinux.org trixie-testing (the image's
+own `keel.sources` with that stanza on), with `policy-rc.d` answering 101 so
+no service starts, then the `.deb` files of the artifact named by
+`package_artifact`, the packages this run built from the pull request. What
+the first boot runs on is "published layer + current testing + this pull
+request's package", which is what an operator has after `apt upgrade`. The
+versions that differ from the published layer go to the job log and the job
+summary before the first boot, so a failure says what booted.
+
+The reason is tracker#53. A published layer whose first boot was broken
+failed this check on every pull request, the one carrying the fix included,
+and the check had to be lifted by hand (keel-core#24, keel-web#4). Now the fix
+reaches the boot as soon as it is in trixie-testing, or as soon as the pull
+request builds it.
+
+Nothing of the upgrade runs on the runner. The maintainer scripts of every
+package it installs, Debian's, trixie-testing's and the pull request's, run
+in the appliance container under its own idmap, which does not map the
+runner's uid, and the AppArmor profile of every other start, so they are
+confined exactly as the appliance's first boot is. A first design ran them in
+a chroot in the boot test's user namespace; that namespace maps the runner's
+own uid, and a fresh `/proc` reaches the host's `/` through `/proc/1/root`,
+so a package could have rewritten the runner's files. The security review of
+.github#20 refused it.
+
+`keel.sources` may name archive.keellinux.org and nothing else, and every
+stanza must carry `Signed-By` and none may be trusted or allow insecure
+repositories; the Debian sources are written by the script. The containers
+on `lxcbr0` cannot reach archive.keellinux.org, which this same machine
+serves: its public IPv4 address refuses them and its IPv6 address drops them
+(measured 2026-10-03, although tracker#5 recorded them reaching it on
+2026-09-30). So the runner fetches the signed indexes of trixie and
+trixie-testing and the packages they name, once per run, the way it already
+fetches the layers, copies them into each container, and the upgrade reads
+them through a `file:` copy of `keel.sources` that keeps its `Signed-By`: apt
+in the container checks the signature and every hash, as over https. The
+runner contacts archive.keellinux.org and the container deb.debian.org, and
+nothing else. `apt-get update`
+runs with `--error-on=any`, so an archive that cannot be reached fails the
+job instead of leaving the layer untouched and green. The upgrade boot does
+not consume the first boot: inithooks, the host keys and the init fence do
+not run, and with the machine id never committed the next start is still
+systemd's first boot.
+
+An artifact is visible only inside the workflow run that uploaded it, so a
+repository that wants its own package in the boot puts the `appliance` job in
+the workflow that builds it, with `needs:` on the build job:
+
+```yaml
+  appliance:
+    needs: build
+    if: vars.KEEL_LXC_RUNNER == 'true'
+    uses: keel-linux/.github/.github/workflows/test-appliance.yml@main
+    with:
+      appliance: core
+      parent: ""
+      package_artifact: keel-core-deb
+```
+
+The check keeps its name, `appliance / boot-published-layer`: the context is
+the caller job and the reusable job, not the workflow file.
+
 ### A layer that has never been published
 
 The job fails. Until 2026-09-28 it passed with a `::notice::` and a job
@@ -219,8 +290,11 @@ unit tested in `tests/appliance-gate.bats` and measured by
   (checked against the parent the published manifest records, not used to
   fetch), `roles` (see below, default empty, which is one container),
   `allow_unpublished` (see below, default `false`), `tooling_ref` (see below,
-  default `main`, and no ordinary caller sets it), `timeout` (minutes,
-  default 60). Read [what it proves](#what-the-appliance-gate-proves) before
+  default `main`, and no ordinary caller sets it), `package_artifact` (an
+  artifact of the same run whose `.deb` files are installed after the
+  upgrade, default empty), `timeout` (minutes, default 60). Before the first
+  boot the rootfs is upgraded from Debian and trixie-testing
+  ([what boots](#what-boots-the-published-layer-upgraded)). Read [what it proves](#what-the-appliance-gate-proves) before
   requiring it for merge. An answer that is neither 200 nor 404, including a
   name that does not resolve, fails the job: reading an outage as "not
   published" would be a green check that tested nothing.

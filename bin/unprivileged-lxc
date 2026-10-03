@@ -37,6 +37,26 @@
 # exactly that refusal, counting the nodes it skipped; any other error, or
 # that one mixed with any other, fails as before.
 #
+# lxc-start is not forwarded straight away. The first time the broker is
+# asked to start a container, it boots it once with the first boot units
+# masked on the init command line (ULX_MASK), runs bin/upgrade-rootfs of
+# this repository (ULX_UPGRADE) inside it through lxc-attach, and stops it;
+# then it starts it as asked, and the first boot the test waits for runs
+# on the upgraded system. The upgrade is apt-get full-upgrade from Debian
+# and archive.keellinux.org trixie-testing, then the .deb files in
+# ULX_DEBS, the packages built from the pull request, when the job has
+# them. So the boot test boots "published layer + current testing + this
+# pull request's package", what an operator has after `apt upgrade`, and a
+# published layer whose first boot is broken no longer fails the pull
+# request that fixes it (tracker#53). The maintainer scripts of those
+# packages run inside the container, under its idmap, which does not map
+# the runner, and the AppArmor profile of every other start; nothing of
+# the upgrade runs on the runner. The upgrade boot leaves the first boot
+# to come untouched: inithooks, the host keys and the init fence do not
+# run, and systemd does not commit a machine id, so the next boot is still
+# systemd's first boot. The versions that changed against the published
+# layer go to the log and, under GitHub Actions, to the job summary.
+#
 # `cleanup` stops the broker and removes SCRATCH, which holds files owned
 # by the subordinate range, through the same namespace.
 set -euo pipefail
@@ -46,6 +66,18 @@ ULX_IDS=65536
 ULX_PROFILE=lxc-container-default-with-nesting
 ULX_FORWARDED="lxc-attach lxc-destroy lxc-info lxc-ls lxc-start lxc-stop lxc-wait"
 ULX_POLL=${ULX_POLL:-0.1}
+ULX_UPGRADE=${ULX_UPGRADE:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/upgrade-rootfs}
+ULX_DEBS=${ULX_DEBS-}
+ULX_MASK="inithooks.service keel-host-keys.service turnkey-init-fence.service systemd-machine-id-commit.service"
+ULX_TRIES=${ULX_TRIES:-90}
+ULX_PAUSE=${ULX_PAUSE:-2}
+ULX_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ULX_INSIDE=/tmp/keel-ci-upgrade
+ULX_ARCHIVE=${ULX_ARCHIVE:-https://archive.keellinux.org}
+ULX_SUITES="trixie trixie-testing"
+ULX_INDEX=main/binary-amd64/Packages
+# A pool path as the archive's index names it, and nothing that climbs.
+ULX_POOL='^pool/[A-Za-z0-9][A-Za-z0-9._+~/-]*\.deb$'
 ULX_TAR=${ULX_TAR:-/usr/bin/tar}
 ULX_SUBUID=${ULX_SUBUID:-/etc/subuid}
 ULX_SUBGID=${ULX_SUBGID:-/etc/subgid}
@@ -159,8 +191,9 @@ ulx_serve() {
         lxc-start)
             defines=$(ulx_defines)
             mapfile -t defines <<< "$defines"
-            systemd-run --user --scope --quiet -p Delegate=yes -- \
-                lxc-start "${defines[@]}" "${argv[@]:1}" ;;
+            ulx_upgrade "${request%/requests/*}" "${argv[@]:1}" \
+                && systemd-run --user --scope --quiet -p Delegate=yes -- \
+                    lxc-start "${defines[@]}" "${argv[@]:1}" ;;
         lxc-attach)
             systemd-run --user --scope --quiet -- "${argv[@]}" ;;
         '')
@@ -171,6 +204,167 @@ ulx_serve() {
     esac < "$input" > "$request/out" 2> "$request/err" || rc=$?
     echo "$rc" > "$request/rc.tmp"
     mv "$request/rc.tmp" "$request/rc"
+}
+
+# --- the upgrade before the first boot, outside the namespace -----------
+
+ulx_say() {
+    echo "unprivileged-lxc: $*" >&2
+}
+
+# ulx_ct PATH NAME COMMAND...: COMMAND as root in the container, in a clean
+# environment.
+ulx_ct() {
+    local path=$1 name=$2
+    shift 2
+    systemd-run --user --scope --quiet -- \
+        lxc-attach -P "$path" -n "$name" --clear-env -- \
+        env PATH="$ULX_PATH" LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive HOME=/root "$@"
+}
+
+# ulx_settled PATH NAME: systemd has finished starting and the network
+# answers.
+ulx_settled() {
+    local state
+    state=$(ulx_ct "$1" "$2" systemctl is-system-running < /dev/null 2>/dev/null) || true
+    case "$state" in running|degraded) ;; *) return 1 ;; esac
+    ulx_ct "$1" "$2" getent ahosts deb.debian.org < /dev/null > /dev/null 2>&1
+}
+
+# ulx_fetch URL FILE: one file of the archive, over https only.
+ulx_fetch() {
+    curl -fsS --proto =https --retry 2 --retry-delay 3 --create-dirs -o "$2" "$1" \
+        || { ulx_say "cannot fetch $1"; return 1; }
+}
+
+# ulx_mirror DIR: the signed indexes of the archive's suites and every
+# package they name, under DIR/archive, fetched by the runner. The
+# containers on lxcbr0 cannot reach archive.keellinux.org, which this same
+# machine serves (refused on its public IPv4 address, dropped on its IPv6
+# one; measured 2026-10-03), while the runner reaches it through its own
+# hosts entry, as it reaches the mirror. Nothing here is trusted: apt in the
+# container checks InRelease against the image's keyring and every file
+# against InRelease.
+ulx_mirror() {
+    local root=$1/archive suite file names
+    local -a files
+    rm -rf "$root"
+    for suite in $ULX_SUITES; do
+        ulx_fetch "$ULX_ARCHIVE/dists/$suite/InRelease" "$root/dists/$suite/InRelease" || return 1
+        ulx_fetch "$ULX_ARCHIVE/dists/$suite/$ULX_INDEX" "$root/dists/$suite/$ULX_INDEX" || return 1
+        names=$(awk '$1 == "Filename:" { print $2 }' "$root/dists/$suite/$ULX_INDEX")
+        mapfile -t files <<< "$names"
+        for file in "${files[@]}"; do
+            if [[ ! $file =~ $ULX_POOL ]] || [[ $file == *..* ]]; then
+                ulx_say "the $suite index names '$file', not a pool file"
+                return 1
+            fi
+            [ -e "$root/$file" ] || ulx_fetch "$ULX_ARCHIVE/$file" "$root/$file" || return 1
+        done
+    done
+    # apt reads them as _apt in the container, whatever the runner's umask.
+    chmod -R a+rX "$root"
+}
+
+# ulx_upgrade_boot DIR PATH NAME DEFINES...: the upgrade boot itself, the
+# container running with the first boot masked.
+ulx_upgrade_boot() {
+    local dir=$1 path=$2 name=$3 try deb unit masked
+    local -a mask=() debs=() inside=()
+    shift 3
+    for unit in $ULX_MASK; do mask+=("systemd.mask=$unit"); done
+    systemd-run --user --scope --quiet -p Delegate=yes -- \
+        lxc-start "$@" -s "lxc.init.cmd=/sbin/init ${mask[*]}" -P "$path" -n "$name" -d \
+        || { ulx_say "the upgrade boot of $name did not start"; return 1; }
+    lxc-wait -P "$path" -n "$name" -s RUNNING -t 60 \
+        || { ulx_say "$name did not reach RUNNING for the upgrade"; return 1; }
+    for ((try = 0; try < ULX_TRIES; try++)); do
+        ! ulx_settled "$path" "$name" || break
+        sleep "$ULX_PAUSE"
+    done
+    [ "$try" -lt "$ULX_TRIES" ] \
+        || { ulx_say "$name did not settle with a network for the upgrade"; return 1; }
+    # shellcheck disable=SC2086
+    masked=$(ulx_ct "$path" "$name" systemctl is-enabled $ULX_MASK < /dev/null 2>&1 | sort -u) || true
+    [ "$masked" = masked-runtime ] \
+        || { ulx_say "the first boot of $name is not held: $(tr '\n' ' ' <<< "$masked")"; return 1; }
+    # shellcheck disable=SC2016
+    tar -C "$dir/archive" -cf - . | ulx_ct "$path" "$name" sh -c 'mkdir -p "$1" && tar -C "$1" --no-same-owner -xf -' sh "$ULX_INSIDE/archive" \
+        || { ulx_say "the archive could not be copied into $name"; return 1; }
+    [ -z "$ULX_DEBS" ] || debs=("$ULX_DEBS"/*.deb)
+    for deb in "${debs[@]+"${debs[@]}"}"; do
+        # shellcheck disable=SC2016
+        ulx_ct "$path" "$name" sh -c 'mkdir -p "$1" && cat > "$1/$2"' sh "$ULX_INSIDE/debs" "${deb##*/}" < "$deb" \
+            || { ulx_say "${deb##*/} could not be copied into $name"; return 1; }
+        inside+=("$ULX_INSIDE/debs/${deb##*/}")
+    done
+    ulx_ct "$path" "$name" bash -s -- "${inside[@]+"${inside[@]}"}" < "$ULX_UPGRADE" > "$dir/upgraded/$name.changes" \
+        || { ulx_say "the upgrade inside $name failed"; return 1; }
+}
+
+# ulx_summary COUNT NAME CHANGES: the job summary's section on a container.
+ulx_summary() {
+    echo "### $2, upgraded before its first boot"
+    echo
+    echo "$1 packages differ from the published layer, from Debian,"
+    echo "archive.keellinux.org trixie-testing and this run's packages."
+    echo
+    [ "$1" -gt 0 ] || return 0
+    echo "| Package | Published | Booted |"
+    echo "| --- | --- | --- |"
+    awk -F'\t' '{ printf "| `%s` | `%s` | `%s` |\n", $1, $2, $3 }' "$3"
+    echo
+}
+
+# ulx_report DIR NAME: the versions that changed, to the log and the summary.
+ulx_report() {
+    local changes=$1/upgraded/$2.changes count
+    count=$(grep -c . "$changes" || true)
+    ulx_say "$2: $count packages differ from the published layer"
+    awk -F'\t' '{ printf "  %s %s -> %s\n", $1, $2, $3 }' "$changes" >&2
+    [ -z "${GITHUB_STEP_SUMMARY-}" ] || ulx_summary "$count" "$2" "$changes" >> "$GITHUB_STEP_SUMMARY"
+}
+
+# ulx_upgrade DIR LXC-START-ARGS...: before the first start of a container
+# in this run, the upgrade boot. True when the container may be started.
+ulx_upgrade() {
+    local dir=$1 path="" name="" rc=0 defines
+    shift
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -P|--lxcpath) path=${2-}; shift ;;
+            --lxcpath=*) path=${1#*=} ;;
+            -n|--name) name=${2-}; shift ;;
+            --name=*) name=${1#*=} ;;
+        esac
+        shift
+    done
+    if [ -z "$path" ] || [[ ! $name =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]]; then
+        ulx_say "lxc-start: -P and a plain -n are needed to upgrade the container first"
+        return 1
+    fi
+    [ ! -e "$dir/upgraded/$name.changes" ] || return 0
+    if [ -n "$ULX_DEBS" ] && ! compgen -G "$ULX_DEBS/*.deb" > /dev/null; then
+        ulx_say "ULX_DEBS is $ULX_DEBS, which holds no .deb; $name is not started"
+        return 1
+    fi
+    mkdir -p "$dir/upgraded"
+    if [ ! -e "$dir/archive/dists" ]; then
+        ulx_say "fetching $ULX_ARCHIVE $ULX_SUITES for the upgrades"
+        ulx_mirror "$dir" || { ulx_say "lxc-start: $name is not started"; return 1; }
+    fi
+    ulx_say "upgrading $name before its first boot"
+    defines=$(ulx_defines)
+    mapfile -t defines <<< "$defines"
+    ulx_upgrade_boot "$dir" "$path" "$name" "${defines[@]}" || rc=1
+    lxc-stop -P "$path" -n "$name" -t 30 > /dev/null 2>&1 \
+        || lxc-stop -P "$path" -n "$name" -k > /dev/null 2>&1 || true
+    if [ "$rc" -ne 0 ]; then
+        rm -f "$dir/upgraded/$name.changes"
+        ulx_say "lxc-start: $name is not started"
+        return 1
+    fi
+    ulx_report "$dir" "$name"
 }
 
 ulx_cleanup() {
