@@ -1,0 +1,175 @@
+#!/bin/bash
+# upgrade-rootfs: bring a booted appliance container up to what an operator
+# gets from `apt upgrade`, before its first boot runs.
+#
+#   upgrade-rootfs [DEB...]
+#
+# The appliance gate boots the layer the mirror publishes. When that layer
+# carries a bug that stops the first boot, every pull request fails the
+# gate, the one carrying the fix included, and the only way out was an
+# admin bypass (tracker#53; keel-core#24, keel-web#4). So before the first
+# boot the system is upgraded: `apt-get full-upgrade` from Debian and from
+# archive.keellinux.org trixie-testing, then the .deb files given, which
+# are the packages built from the pull request under test. What the first
+# boot then runs on is "published layer + current testing + this pull
+# request's package".
+#
+# It runs as root inside the appliance container itself, fed on stdin to
+# `bash -s` through lxc-attach by bin/unprivileged-lxc, during a boot in
+# which the first boot units are masked. It is never run on the runner:
+# the container has its own idmap, which does not map the runner, and the
+# AppArmor profile of the real boot, so the maintainer scripts of the
+# packages it installs are confined as the appliance itself is. DEB paths
+# are paths inside the container.
+#
+# apt reads a sources directory of its own, the image's keel.sources with
+# trixie-testing enabled plus Debian's trixie, trixie-updates and
+# trixie-security from deb.debian.org; the image's own sources files are
+# not touched. The containers cannot reach archive.keellinux.org, so the
+# runner fetches its suites and puts them in the container under
+# /tmp/keel-ci-upgrade/archive, and keel.sources points there (file:),
+# keeping its Signed-By: apt checks them as it would over https.
+# keel.sources may name archive.keellinux.org and nothing else, every
+# stanza signed (Signed-By) and none of them trusted or insecure, so the
+# container contacts no host but deb.debian.org and installs nothing
+# unsigned. No service is started or restarted: /usr/sbin/policy-rc.d
+# answers 101 for the duration, and the image's own, if it has one, is put
+# back afterwards. The package lists and the downloaded archives are
+# removed again, as the layer was published without them.
+#
+# stdout carries one line per package whose version differs from the
+# published layer, "package<TAB>before<TAB>after" with "-" for a package
+# absent on one side, for the caller to log and summarise. Everything else
+# goes to stderr.
+#
+# UR_ROOT prefixes every path, for tests/upgrade-rootfs.bats; it is empty
+# in the container.
+set -euo pipefail
+shopt -s inherit_errexit
+
+UR_ROOT=${UR_ROOT-}
+UR_WORK=/tmp/keel-ci-upgrade
+UR_ARCHIVE=https://archive.keellinux.org
+UR_TESTING=trixie-testing
+UR_DEBIAN=http://deb.debian.org
+UR_DEBIAN_KEYRING=/usr/share/keyrings/debian-archive-keyring.pgp
+UR_KEEL_SOURCES=/etc/apt/sources.list.d/keel.sources
+# Installed version per package, of the packages dpkg calls installed;
+# dpkg-query's fields, not the shell's.
+# shellcheck disable=SC2016
+UR_QUERY='${db:Status-Abbrev}\t${binary:Package}\t${Version}\n'
+# awk programs, single quoted so the shell leaves their fields alone.
+# shellcheck disable=SC2016
+UR_INSTALLED='$1 ~ /^ii/ { print $2 "\t" $3 }'
+# Two lists of "package<TAB>version", before then after: one line for every
+# package whose version differs.
+# shellcheck disable=SC2016
+UR_CHANGED='FNR == NR { before[$1] = $2; next } { after[$1] = $2 } END { for (p in after) { if (!(p in before)) { print p "\t-\t" after[p] } else if (before[p] != after[p]) { print p "\t" before[p] "\t" after[p] } } for (p in before) if (!(p in after)) print p "\t" before[p] "\t-" }'
+# Every stanza of keel.sources: why it may not be used, if it may not.
+# shellcheck disable=SC2016
+UR_REFUSED='BEGIN { RS = "" } { n++ } !/(^|\n)Signed-By:[ \t]*[^ \t\n]/ { print "stanza " n " has no Signed-By" } tolower($0) ~ /(^|\n)(trusted|allow-insecure|allow-weak|allow-downgrade-to-insecure):[ \t]*yes/ { print "stanza " n " is trusted or allows insecure" } /(^|\n)URIs:/ { line = substr($0, index($0, "URIs:") + 5); sub(/\n.*/, "", line); m = split(line, uri, /[ \t]+/); for (i = 1; i <= m; i++) if (uri[i] != "" && uri[i] != archive && uri[i] != archive "/") print "stanza " n " names " uri[i] }'
+
+ur_die() {
+    echo "upgrade-rootfs: $*" >&2
+    exit 2
+}
+
+ur_log() {
+    echo "upgrade-rootfs: $*" >&2
+}
+
+ur_sources() {
+    local dir=$UR_ROOT$UR_WORK/sources.list.d keel=$UR_ROOT$UR_KEEL_SOURCES refused
+    [ -f "$keel" ] || ur_die "the image has no $UR_KEEL_SOURCES to take $UR_TESTING from"
+    refused=$(awk -v archive="$UR_ARCHIVE" "$UR_REFUSED" "$keel")
+    [ -z "$refused" ] || ur_die "$UR_KEEL_SOURCES is refused: $(tr '\n' ';' <<< "$refused")"
+    mkdir -p "$dir"
+    : > "$UR_ROOT$UR_WORK/sources.list"
+    sed -e "/^Suites: $UR_TESTING\$/,/^\$/ s/^Enabled: no\$/Enabled: yes/" \
+        -e "s|^URIs:.*|URIs: file:$UR_ROOT$UR_WORK/archive|" "$keel" > "$dir/keel.sources"
+    grep -q "^Suites: $UR_TESTING\$" "$dir/keel.sources" \
+        || ur_die "$UR_KEEL_SOURCES of the image has no $UR_TESTING stanza"
+    cat > "$dir/debian.sources" <<SOURCES
+Types: deb
+URIs: $UR_DEBIAN/debian
+Suites: trixie trixie-updates
+Components: main non-free-firmware
+Signed-By: $UR_DEBIAN_KEYRING
+
+Types: deb
+URIs: $UR_DEBIAN/debian-security
+Suites: trixie-security
+Components: main non-free-firmware
+Signed-By: $UR_DEBIAN_KEYRING
+SOURCES
+}
+
+ur_policy() {
+    local policy=$UR_ROOT/usr/sbin/policy-rc.d
+    if [ -e "$policy" ] || [ -L "$policy" ]; then
+        mv "$policy" "$UR_ROOT$UR_WORK/policy-rc.d.image"
+    fi
+    printf '#!/bin/sh\nexit 101\n' > "$policy"
+    chmod 0755 "$policy"
+}
+
+# ur_cleanup: what the run put in the system goes.
+ur_cleanup() {
+    local policy=$UR_ROOT/usr/sbin/policy-rc.d saved=$UR_ROOT$UR_WORK/policy-rc.d.image
+    if [ -e "$saved" ] || [ -L "$saved" ]; then
+        mv -f "$saved" "$policy"
+    else
+        rm -f "$policy"
+    fi
+    rm -rf "${UR_ROOT}${UR_WORK:?}"
+    find "$UR_ROOT/var/lib/apt/lists" -maxdepth 1 -type f ! -name lock -delete 2>/dev/null || true
+    find "$UR_ROOT/var/cache/apt/archives" -maxdepth 1 -type f -name '*.deb' -delete 2>/dev/null || true
+}
+
+ur_apt() {
+    apt-get -q -o "Dir::Etc::SourceList=$UR_ROOT$UR_WORK/sources.list" \
+        -o "Dir::Etc::SourceParts=$UR_ROOT$UR_WORK/sources.list.d" \
+        -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@" >&2
+}
+
+ur_installed() {
+    dpkg-query -W -f="$UR_QUERY" | awk -F'\t' "$UR_INSTALLED" | sort
+}
+
+# ur_debs DEB...: install the pull request's packages, whatever version the
+# archive has, then check each one is installed at its own version.
+ur_debs() {
+    local deb package version installed
+    for deb in "$@"; do
+        [[ $deb == *.deb && -f $deb ]] || ur_die "'$deb' is not a .deb file"
+    done
+    ur_apt install -y --reinstall --allow-downgrades "$@"
+    for deb in "$@"; do
+        package=$(dpkg-deb -f "$deb" Package)
+        version=$(dpkg-deb -f "$deb" Version)
+        # shellcheck disable=SC2016
+        installed=$(dpkg-query -W -f='${Version}' "$package")
+        [ "$installed" = "$version" ] \
+            || ur_die "$package $version from ${deb##*/} is not what is installed ($installed)"
+        ur_log "installed $package $version from this run's ${deb##*/}"
+    done
+}
+
+ur_main() {
+    local before=$UR_ROOT$UR_WORK/before after=$UR_ROOT$UR_WORK/after
+    mkdir -p "$UR_ROOT$UR_WORK"
+    trap ur_cleanup EXIT
+    ur_sources
+    ur_policy
+    ur_installed > "$before"
+    ur_log "apt-get full-upgrade from Debian and archive.keellinux.org $UR_TESTING"
+    # An index that cannot be fetched is an error, not a warning: without
+    # it the upgrade is a no-op and the boot would test the layer untouched.
+    ur_apt update --error-on=any
+    ur_apt -y full-upgrade
+    [ $# -eq 0 ] || ur_debs "$@"
+    ur_installed > "$after"
+    awk -F'\t' "$UR_CHANGED" "$before" "$after" | sort
+}
+
+ur_main "$@"

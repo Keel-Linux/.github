@@ -6,7 +6,10 @@
 # that record what they were asked to do, so the cases below check the
 # wiring: which mappings the namespace gets, what lxc-start is given on top
 # of the boot test's own config, that stdin and the exit status make the
-# round trip, and that tar forgives only the device nodes.
+# round trip, that the first lxc-start of a container is preceded by an
+# upgrade boot with the first boot masked, and that tar forgives only the
+# device nodes. bin/upgrade-rootfs only ever reaches the container on
+# stdin here; tests/upgrade-rootfs.bats tests it.
 
 # The stand-ins are written in single quotes on purpose: they expand when
 # they run, inside the namespace.
@@ -54,11 +57,32 @@ exec "$@"
 FAKE
     # The real LXC commands: record the arguments and stdin, answer with
     # the exit status asked for in FAKE_STATUS_<command>.
-    for command in lxc-attach lxc-info lxc-start lxc-stop; do
+    # An lxc-attach with --clear-env is the broker's, during the upgrade
+    # boot: it answers as a container whose systemd is FAKE_SYSTEM, whose
+    # first boot units are FAKE_MASKED, and whose upgrade prints
+    # FAKE_CHANGES and exits FAKE_STATUS_script.
+    for command in lxc-attach lxc-info lxc-start lxc-stop lxc-wait; do
         cat > "$FAKES/$command" <<'FAKE'
 #!/bin/bash
 name=$(basename "$0")
 echo "$name $*" >> "$LOG"
+if [ "$name" = lxc-attach ] && [[ " $* " == *" --clear-env "* ]]; then
+    case " $* " in
+        *" is-system-running "*) echo "${FAKE_SYSTEM:-running}" ;;
+        *" is-enabled "*)
+            for unit in "${@: -4}"; do echo "${FAKE_MASKED:-masked-runtime}"; done ;;
+        *" sh -c "*" /tmp/keel-ci-upgrade/archive "*)
+            tar -tf - | sed 's/^/archived: /' >> "$LOG"; exit "${FAKE_STATUS_archive:-0}" ;;
+        *" sh -c "*) sed "s/^/copied ${*: -1}: /" >> "$LOG"; exit "${FAKE_STATUS_copy:-0}" ;;
+        *" bash -s "*)
+            sed 's/^/script: /' >> "$LOG"
+            printf '%b' "${FAKE_CHANGES-}"
+            echo "the upgrade says what it does" >&2
+            exit "${FAKE_STATUS_script:-0}" ;;
+    esac
+    exit 0
+fi
+[ "$name" != lxc-stop ] || [[ " $* " != *" -t "* ]] || exit "${FAKE_STATUS_clean_stop:-0}"
 [ "$name" != lxc-attach ] || sed 's/^/stdin: /' >> "$LOG"
 echo "$name says hello"
 echo "$name complains" >&2
@@ -66,7 +90,29 @@ var=FAKE_STATUS_${name//-/_}
 exit "${!var:-0}"
 FAKE
     done
+    # curl -fsS ... -o FILE URL: the archive, as the runner fetches it.
+    cat > "$FAKES/curl" <<'FAKE'
+#!/bin/bash
+url=${*: -1}
+out=$(sed -n 's/.* -o \([^ ]*\) .*/\1/p' <<< "$*")
+echo "curl $url" >> "$LOG"
+[[ $url != *"${FAKE_CURL_FAILS:-never}"* ]] || exit 22
+mkdir -p "${out%/*}"
+case "$url" in
+    */InRelease) echo "signed index" > "$out" ;;
+    */Packages) printf 'Package: keel\nFilename: %s\n\nPackage: inithooks\nFilename: pool/main/i/inithooks/inithooks_23_all.deb\n' \
+                    "${FAKE_FILENAME:-pool/main/k/keel/keel_0.15.4_all.deb}" > "$out" ;;
+    *) echo "a package" > "$out" ;;
+esac
+FAKE
     chmod +x "$FAKES"/*
+    # bin/upgrade-rootfs as the container receives it: on stdin.
+    echo "THE UPGRADE SCRIPT" > "$TMP/upgrade-rootfs"
+    ULX_UPGRADE="$TMP/upgrade-rootfs"
+    ULX_PAUSE=0
+    FAKE_CHANGES='inithooks\t21\t23\nnew-thing\t-\t2\n'
+    unset GITHUB_STEP_SUMMARY ULX_DEBS
+    export ULX_UPGRADE ULX_PAUSE FAKE_CHANGES
 }
 
 teardown() {
@@ -148,6 +194,229 @@ boot_test() {
     [ "$status" -eq 0 ]
     grep -qx 'systemd-run --user --scope --quiet -p Delegate=yes' "$LOG"
     grep -qx 'lxc-start -s lxc.include=/usr/share/lxc/config/userns.conf -s lxc.idmap=u 0 100000 65536 -s lxc.idmap=g 0 200000 65536 -s lxc.apparmor.profile=lxc-container-default-with-nesting -s lxc.apparmor.allow_nesting=0 -P /lxc -n box -d' "$LOG"
+}
+
+# --- the upgrade boot before the first start ---------------------------
+
+MASK='lxc.init.cmd=/sbin/init systemd.mask=inithooks.service systemd.mask=keel-host-keys.service systemd.mask=turnkey-init-fence.service systemd.mask=systemd-machine-id-commit.service'
+
+@test "the first start of a container is an upgrade boot, with the first boot masked" {
+    boot_test 'lxc-start -P /lxc -n box -d
+lxc-stop -P /lxc -n box
+lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 0 ]
+    grep -qx "lxc-start -s lxc.include=/usr/share/lxc/config/userns.conf -s lxc.idmap=u 0 100000 65536 -s lxc.idmap=g 0 200000 65536 -s lxc.apparmor.profile=lxc-container-default-with-nesting -s lxc.apparmor.allow_nesting=0 -s $MASK -P /lxc -n box -d" "$LOG"
+    grep -qx 'lxc-wait -P /lxc -n box -s RUNNING -t 60' "$LOG"
+    grep -qx 'lxc-attach -P /lxc -n box --clear-env -- env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive HOME=/root bash -s --' "$LOG"
+    grep -qx 'script: THE UPGRADE SCRIPT' "$LOG"
+    [ "$(grep -c -- "-s $MASK" "$LOG")" -eq 1 ]
+    [ "$(grep -c '^lxc-start' "$LOG")" -eq 3 ]
+    # upgrade boot, its stop, then the start the test asked for
+    [ "$(grep -E '^lxc-(start|stop)' "$LOG" | sed -n 2p)" = 'lxc-stop -P /lxc -n box -t 30' ]
+    [ "$(grep -E '^lxc-(start|stop)' "$LOG" | sed -n 3p)" = 'lxc-start -s lxc.include=/usr/share/lxc/config/userns.conf -s lxc.idmap=u 0 100000 65536 -s lxc.idmap=g 0 200000 65536 -s lxc.apparmor.profile=lxc-container-default-with-nesting -s lxc.apparmor.allow_nesting=0 -P /lxc -n box -d' ]
+    [[ "$output" == *"box: 2 packages differ from the published layer"* ]]
+    [[ "$output" == *"  inithooks 21 -> 23"* ]]
+    [[ "$output" == *"the upgrade says what it does"* ]]
+}
+
+@test "each container gets its upgrade boot, found by the long options too" {
+    boot_test 'lxc-start --lxcpath /lxc --name box -d
+lxc-start --lxcpath=/lxc --name=other -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 0 ]
+    grep -q -- "-s $MASK -P /lxc -n box -d\$" "$LOG"
+    grep -q -- "-s $MASK -P /lxc -n other -d\$" "$LOG"
+}
+
+@test "the changed versions go to the job summary, a table only when there are some" {
+    export GITHUB_STEP_SUMMARY="$TMP/summary"
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 0 ]
+    grep -qx '### box, upgraded before its first boot' "$GITHUB_STEP_SUMMARY"
+    grep -qx '| `inithooks` | `21` | `23` |' "$GITHUB_STEP_SUMMARY"
+    grep -qx '| `new-thing` | `-` | `2` |' "$GITHUB_STEP_SUMMARY"
+
+    : > "$GITHUB_STEP_SUMMARY"
+    export FAKE_CHANGES=''
+    boot_test 'lxc-start -P /lxc -n other -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 0 ]
+    grep -q '^0 packages differ' "$GITHUB_STEP_SUMMARY"
+    run ! grep -q '^| Package' "$GITHUB_STEP_SUMMARY"
+}
+
+@test "the packages in ULX_DEBS are copied in and handed to the upgrade" {
+    mkdir -p "$TMP/debs"
+    echo "deb bytes" > "$TMP/debs/keel-core_0.1.3_all.deb"
+    : > "$TMP/debs/keel-core_0.1.3.dsc"
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ULX_DEBS="$TMP/debs" ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 0 ]
+    grep -qx 'copied keel-core_0.1.3_all.deb: deb bytes' "$LOG"
+    grep -q 'sh -c mkdir -p "$1" && cat > "$1/$2" sh /tmp/keel-ci-upgrade/debs keel-core_0.1.3_all.deb$' "$LOG"
+    grep -q 'bash -s -- /tmp/keel-ci-upgrade/debs/keel-core_0.1.3_all.deb$' "$LOG"
+}
+
+@test "a package that cannot be copied in stops the upgrade" {
+    mkdir -p "$TMP/debs"
+    : > "$TMP/debs/keel-core_0.1.3_all.deb"
+    export FAKE_STATUS_copy=1
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ULX_DEBS="$TMP/debs" ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"keel-core_0.1.3_all.deb could not be copied into box"* ]]
+    run ! grep -q '^script:' "$LOG"
+}
+
+@test "the runner fetches the archive once, and each container gets a copy" {
+    boot_test 'lxc-start -P /lxc -n box -d
+lxc-start -P /lxc -n other -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^curl https://archive.keellinux.org/dists/trixie-testing/InRelease$' "$LOG")" -eq 1 ]
+    grep -qx 'curl https://archive.keellinux.org/dists/trixie/main/binary-amd64/Packages' "$LOG"
+    [ "$(grep -c '^curl https://archive.keellinux.org/pool/main/k/keel/keel_0.15.4_all.deb$' "$LOG")" -eq 1 ]
+    [ "$(grep -c '^archived: ./dists/trixie-testing/InRelease$' "$LOG")" -eq 2 ]
+    [ "$(grep -c '^archived: ./pool/main/i/inithooks/inithooks_23_all.deb$' "$LOG")" -eq 2 ]
+    [ "$(grep -n '^archived:' "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n '^script:' "$LOG" | head -1 | cut -d: -f1)" ]
+}
+
+@test "an archive that cannot be fetched starts nothing" {
+    export FAKE_CURL_FAILS=trixie-testing/InRelease
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cannot fetch https://archive.keellinux.org/dists/trixie-testing/InRelease"* ]]
+    run ! grep -q '^lxc-start' "$LOG"
+}
+
+@test "an index that names anything but a pool file is refused" {
+    export FAKE_FILENAME=pool/../../etc/passwd.deb
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the trixie index names 'pool/../../etc/passwd.deb', not a pool file"* ]]
+    run ! grep -q 'etc/passwd' <(grep '^curl' "$LOG")
+    run ! grep -q '^lxc-start' "$LOG"
+}
+
+@test "an archive that cannot be copied in stops the upgrade" {
+    export FAKE_STATUS_archive=1
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the archive could not be copied into box"* ]]
+    run ! grep -q '^script:' "$LOG"
+}
+
+@test "a ULX_DEBS with no package in it is refused, nothing is started" {
+    mkdir -p "$TMP/debs"
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ULX_DEBS="$TMP/debs" ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"holds no .deb; box is not started"* ]]
+    run ! grep -q '^lxc-start' "$LOG"
+}
+
+@test "a failed upgrade stops the container and does not start it" {
+    export FAKE_STATUS_script=100
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the upgrade inside box failed"* ]]
+    [[ "$output" == *"lxc-start: box is not started"* ]]
+    [ "$(grep -c '^lxc-start' "$LOG")" -eq 1 ]
+    grep -qx 'lxc-stop -P /lxc -n box -t 30' "$LOG"
+    [ ! -e "$SCRATCH/userns/upgraded/box.changes" ]
+}
+
+@test "a container whose clean stop fails is killed" {
+    export FAKE_STATUS_clean_stop=1
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 0 ]
+    grep -qx 'lxc-stop -P /lxc -n box -k' "$LOG"
+}
+
+@test "a first boot that is not masked is not upgraded" {
+    export FAKE_MASKED=enabled
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the first boot of box is not held: enabled"* ]]
+    run ! grep -q '^script:' "$LOG"
+}
+
+@test "a container that never settles is not upgraded" {
+    export FAKE_SYSTEM=starting ULX_TRIES=3
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"box did not settle with a network"* ]]
+    [ "$(grep -c 'is-system-running' "$LOG")" -eq 3 ]
+}
+
+@test "a container that does not reach RUNNING is not upgraded" {
+    export FAKE_STATUS_lxc_wait=1
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"box did not reach RUNNING"* ]]
+}
+
+@test "an upgrade boot that does not start fails lxc-start" {
+    export FAKE_STATUS_lxc_start=1
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the upgrade boot of box did not start"* ]]
+    [ "$(grep -c '^lxc-start' "$LOG")" -eq 1 ]
+}
+
+@test "lxc-start without a plain container name is refused" {
+    boot_test 'lxc-start -P /lxc -n ../box -d'
+
+    ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"-P and a plain -n are needed"* ]]
+    run ! grep -q '^lxc-start' "$LOG"
 }
 
 @test "stdout, stderr and the exit status of a forwarded command come back" {
