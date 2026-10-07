@@ -1,0 +1,21 @@
+# This repository's own security scan. It calls security-scan.yml from the
+# working tree, and the shared tooling at the same commit, so a pull request
+# that changes either is scanned by its own version. shellcheck is forced on:
+# lint.yml mentions shellcheck, but only for the run blocks of the workflows.
+name: security
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  security:
+    uses: ./.github/workflows/security-scan.yml
+    permissions:
+      contents: read
+      security-events: write
+    with:
+      shellcheck: always
+      tooling-ref: ${{ github.event.pull_request.head.sha || github.sha }}

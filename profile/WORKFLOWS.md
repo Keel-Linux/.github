@@ -17,6 +17,7 @@ GitHub names the check after the caller's job id and the reusable job id:
 | `test-shell.yml` | `coverage` | `tests / coverage` |
 | `test-appliance.yml` | `boot-published-layer` | `appliance / boot-published-layer` (caller job id `appliance`) |
 | `lxc-trixie.yml` | `trixie` | `build / trixie` (caller job id `build`) |
+| `security-scan.yml` | `gitleaks`, `bandit`, `semgrep`, `shellcheck`, `upload` | `security / gitleaks` and so on (caller job id `security`) |
 
 Renaming a caller job renames the check, so keep the job id `tests`. Renaming
 a reusable job renames it for every caller at once: `build-and-boot` became
@@ -323,6 +324,10 @@ unit tested in `tests/appliance-gate.bats` and measured by
   called `sudo apt-get` on the runner, had no callers, and the runner has
   had no sudo since that day.
 
+- `security-scan.yml`: automatic security scanning on hosted
+  `ubuntu-latest`, beside the human and AI reviews, which stay outside CI.
+  See [Security scanning](#security-scanning). Not a required check yet.
+
 ## Example callers
 
 Python repository (keel, turnkey-chroot):
@@ -394,6 +399,82 @@ jobs:
         (cd /tmp && mk-build-deps --install --remove --tool 'apt-get -y -qq --no-install-recommends' /src/debian/control)
         gbp buildpackage --git-ignore-branch --git-builder='dpkg-buildpackage -us -uc'
 ```
+
+Security scanning, in every code repository, as
+`.github/workflows/security.yml` (the branch is the repository's default):
+
+```yaml
+name: security
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  security:
+    uses: keel-linux/.github/.github/workflows/security-scan.yml@main
+    permissions:
+      contents: read
+      security-events: write
+```
+
+## Security scanning
+
+`security-scan.yml` runs four scanners, one job each, and a fifth job that
+uploads their findings to code scanning:
+
+| Job | What | Fails on |
+| --- | --- | --- |
+| `gitleaks` | secrets in git: the pull request's commits, the whole history on a push to the default branch or a manual run | any finding not allowlisted |
+| `bandit` | Python, medium severity and above | a finding outside the baseline |
+| `semgrep` | `p/python`, `r/bash`, `p/secrets`, plus `p/javascript`, `p/typescript`, `p/golang`, `p/php` for the languages tracked; WARNING and ERROR | a finding outside the baseline |
+| `shellcheck` | every shell script, warning and above; skipped when another workflow of the repository already runs shellcheck | a finding outside the baseline |
+
+Pinned: gitleaks by version and SHA-256 of the release tarball, bandit and
+semgrep by PyPI version. Semgrep's rulesets come from the public registry
+without an account or a token and are not versioned, so a rule added
+upstream can flag code nobody touched; that finding is triaged like any
+other. The registry has no `p/bash` pack, so `r/bash` (every bash rule of
+semgrep-rules) stands in for it.
+
+Tests are not scanned by bandit, semgrep and shellcheck (directories named
+`test`, `tests` or `testing`): they ship nothing and their fixtures are
+insecure on purpose. gitleaks does scan them, because a real key committed to
+a fixture is still a leaked key.
+
+**The baseline.** Findings that are not a risk are listed in the repository's
+`.github/security-baseline`, one per line, the fingerprint and a one line
+justification. Only a finding outside it fails, so the check holds the line
+on new code without requiring the old code to be rewritten first. The
+fingerprint is `TOOL:RULE:PATH:HASH` of the flagged line's text, not its
+number, so moving code does not invalidate an entry and editing the flagged
+line puts it up for review again. An entry without a justification, or with
+`TODO`, fails the job. Entries that match nothing are listed in the job
+summary for removal. `bin/security-baseline write TOOL REPORT` prints the
+entries of a report, each with `TODO` for the justification. gitleaks has
+its own mechanisms: a repository's `.github/gitleaks.toml` extends the
+default rules with an allowlist of its fixtures, by path; a single false
+positive goes in `.github/.gitleaksignore` by its fingerprint, under a
+comment saying why. A real secret is revoked, not ignored. All three files
+live under `.github/` because they ship nothing, so `require-changelog`
+exempts them already.
+
+**Safety.** No job runs on the self-hosted runner: the runner group admits
+only `lxc-trixie.yml` and `test-appliance.yml`, and this workflow does not
+need it. No secret is used, so the checks run unchanged on a pull request
+from a fork; callers use `pull_request`, never `pull_request_target`, the
+scanners only read the tree and no checkout keeps its credentials. The
+scanning jobs have `contents: read`; only `upload` has
+`security-events: write`. It runs where code scanning exists, a public
+repository (the free plan has no code scanning for private ones) on an event
+that is not a fork's pull request. The SARIF it uploads carries only the
+findings outside the baseline, so the code scanning alerts of a default
+branch are the findings still waiting for a decision.
+
+CodeQL default setup runs beside it on the public repositories with Python or
+JavaScript, configured through the API, on GitHub's runners.
 
 ## Several nodes in the appliance gate
 
