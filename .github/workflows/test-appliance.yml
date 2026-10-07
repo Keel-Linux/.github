@@ -235,7 +235,7 @@ jobs:
 
       # No credentials stay in .git/config: the boot test runs as root in a
       # user namespace that can read the whole workspace.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -256,7 +256,7 @@ jobs:
       # temporary caller setting tooling_ref to the branch, is the only
       # check there is, and it has to be done by hand.
       - name: Check out the gate's own tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: keel-linux/.github
           ref: ${{ inputs.tooling_ref }}
@@ -390,7 +390,7 @@ jobs:
 
       # The pull request's packages, which bin/upgrade-rootfs installs in
       # the container after the upgrade. bin/unprivileged-lxc reads them from ULX_DEBS.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: steps.layer.outputs.published == 'true' && inputs.package_artifact != ''
         with:
           name: ${{ inputs.package_artifact }}
