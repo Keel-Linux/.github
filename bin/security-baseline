@@ -1,0 +1,227 @@
+#!/bin/bash
+# The findings of a security scanner that are not in the repository's
+# baseline. Used by .github/workflows/security-scan.yml.
+#
+# usage: security-baseline targets python|shell
+#        security-baseline check TOOL REPORT BASELINE [SARIF]
+#        security-baseline write TOOL REPORT
+#
+#   targets   the tracked files of one language, NUL separated: by extension
+#             (.py, .sh, .bash) or by the interpreter on the first line, as
+#             most scripts of this organization have no extension. Files
+#             under a test, tests or testing directory are left out, as
+#             semgrep leaves them out by default: they ship nothing, and
+#             their fixtures are insecure on purpose
+#   check     compare REPORT (the JSON of TOOL) with BASELINE; print each new
+#             finding as a workflow error, and write the new ones as SARIF
+#   write     print a baseline line for every finding of REPORT, each with
+#             the justification TODO, which check refuses until it is written
+#
+#   TOOL      bandit (bandit -f json), semgrep (semgrep --json) or shellcheck
+#             (shellcheck -f json1)
+#
+# A finding is known by its fingerprint,
+#   TOOL:RULE:PATH:HASH
+# where HASH is the first 12 hex digits of the SHA-256 of the flagged line
+# with all its white space removed. The line number is left out, so a finding
+# keeps its fingerprint when code above it moves; editing the flagged line
+# itself makes it a new finding, to be looked at again. A space in PATH is
+# written %20.
+#
+# The baseline is a text file, one finding per line, the fingerprint then a
+# one line justification of why it is not a risk:
+#   bandit:B602:bin/thing:0123456789ab  the command is a constant, no input reaches it
+# Blank lines and lines starting with # are ignored. An entry without a
+# justification, or whose justification is TODO, is an error: a baseline is
+# a list of decisions, not a mute button.
+#
+# Exit codes:
+#   0  no finding outside the baseline
+#   1  at least one finding is not in the baseline
+#   2  the arguments, the report or the baseline are not usable
+set -uo pipefail
+
+die() {
+    echo "security-baseline: $1" >&2
+    exit 2
+}
+
+# targets LANGUAGE: the tracked files of LANGUAGE, NUL separated.
+targets() {
+    local ext shebang path first
+    case "$1" in
+        python)
+            ext='\.pyw?$'
+            shebang='^#!.*python[0-9.]*([[:space:]]|$)'
+            ;;
+        shell)
+            ext='\.(sh|bash)$'
+            shebang='^#!.*(/|env[[:space:]]+)(ba|da|k)?sh([[:space:]]|$)'
+            ;;
+        *) die "targets: unknown language '$1' (python or shell)" ;;
+    esac
+    mapfile -d '' paths < <(git ls-files -z)
+    for path in "${paths[@]}"; do
+        [[ -f "$path" && ! -L "$path" ]] || continue
+        [[ ! "$path" =~ (^|/)(tests?|testing)/ ]] || continue
+        if [[ "$path" =~ $ext ]]; then
+            printf '%s\0' "$path"
+            continue
+        fi
+        first="$(head -c 256 "$path" 2>/dev/null | head -n 1 | tr -d '\0')"
+        [[ "$first" =~ $shebang ]] && printf '%s\0' "$path"
+    done
+    return 0
+}
+
+# normalize TOOL REPORT: one finding per line,
+#   RULE <TAB> PATH <TAB> LINE <TAB> SEVERITY <TAB> MESSAGE
+normalize() {
+    local filter
+    case "$1" in
+        bandit)
+            filter='.results[] | [.test_id, .filename, .line_number, .issue_severity, .issue_text]'
+            ;;
+        semgrep)
+            filter='.results[] | [.check_id, .path, .start.line, .extra.severity, .extra.message]'
+            ;;
+        shellcheck)
+            filter='.comments[] | ["SC\(.code)", .file, .line, .level, .message]'
+            ;;
+        *) die "unknown tool '$1' (bandit, semgrep or shellcheck)" ;;
+    esac
+    [[ -r "$2" ]] || die "no report at $2"
+    jq -r "$filter"' | map(tostring | gsub("[\t\n\r]"; " ")) | @tsv' "$2" \
+        || die "$2 is not a $1 JSON report"
+}
+
+# fingerprint TOOL RULE PATH LINE
+fingerprint() {
+    local path="${3#./}" text hash
+    text="$(sed -n "${4}p" "$path" 2>/dev/null | tr -d '[:space:]')"
+    hash="$(printf '%s' "$text" | sha256sum | cut -c1-12)"
+    printf '%s:%s:%s:%s\n' "$1" "$2" "${path// /%20}" "$hash"
+}
+
+# findings TOOL REPORT: FINGERPRINT <TAB> the normalized finding.
+findings() {
+    local tool="$1" report="$2" normalized rule path line rest
+    normalized="$(normalize "$tool" "$report")" || exit 2
+    [[ -n "$normalized" ]] || return 0
+    while IFS=$'\t' read -r rule path line rest; do
+        printf '%s\t%s\t%s\t%s\t%s\n' \
+            "$(fingerprint "$tool" "$rule" "$path" "$line")" \
+            "$rule" "${path#./}" "$line" "$rest"
+    done <<< "$normalized"
+}
+
+# baseline_entries BASELINE: the fingerprints of BASELINE, one per line.
+# Fails on an entry without a justification.
+baseline_entries() {
+    local file="$1" n=0 entry why bad=0 entries
+    [[ -e "$file" ]] || return 0
+    [[ -r "$file" ]] || die "cannot read the baseline $file"
+    mapfile -t entries < "$file"
+    for entry in "${entries[@]}"; do
+        n=$((n + 1))
+        [[ "$entry" =~ ^[[:space:]]*(#|$) ]] && continue
+        why="${entry#*[[:space:]]}"
+        [[ "$why" == "$entry" ]] && why=""
+        why="${why#"${why%%[![:space:]]*}"}"
+        if [[ -z "$why" || "$why" == TODO* ]]; then
+            echo "security-baseline: $file:$n: the entry has no justification" >&2
+            bad=1
+        fi
+        printf '%s\n' "${entry%%[[:space:]]*}"
+    done
+    [[ "$bad" -eq 0 ]] || exit 2
+}
+
+# The findings, one per line as findings() prints them, as a SARIF 2.1.0 log.
+read -r -d '' SARIF_PROGRAM <<'JQ' || true
+def level: ascii_downcase
+    | if . == "high" or . == "error" then "error"
+      elif . == "medium" or . == "warning" then "warning"
+      else "note" end;
+[split("\n")[] | select(length > 0) | split("\t")
+ | {fp: .[0], rule: .[1], path: .[2], line: (.[3] | tonumber),
+    severity: .[4], message: .[5]}] as $f
+| {"$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+   version: "2.1.0",
+   runs: [{
+     tool: {driver: {name: $tool, rules: [$f[].rule] | unique | map({id: .})}},
+     results: [$f[] | {
+       ruleId: .rule,
+       level: (.severity | level),
+       message: {text: .message},
+       locations: [{physicalLocation: {
+         artifactLocation: {uri: .path},
+         region: {startLine: .line}}}],
+       partialFingerprints: {"keelBaseline/v1": .fp}}]}]}
+JQ
+
+# New findings: the lines of ALL (findings()) whose fingerprint is not in
+# KNOWN (one fingerprint per line). Stale entries: the lines of KNOWN for
+# TOOL that match no finding.
+# shellcheck disable=SC2016  # an awk program, expanded by awk
+NEW_PROGRAM='NR == FNR { if ($0 != "") known[$0] = 1; next } $0 != "" && !($1 in known)'
+# shellcheck disable=SC2016  # an awk program, expanded by awk
+STALE_PROGRAM='NR == FNR { if ($0 != "") seen[$1] = 1; next } $0 != "" && index($0, tool ":") == 1 && !($0 in seen)'
+# shellcheck disable=SC2016  # an awk program, expanded by awk
+WRITE_PROGRAM='!seen[$1]++ { printf "%s TODO %s %s %s:%s: %s\n", $1, $2, $5, $3, $4, substr($6, 1, 80) }'
+
+check() {
+    local tool="$1" report="$2" baseline="$3" out="${4:-}"
+    local all known new stale total count
+    all="$(findings "$tool" "$report")" || exit 2
+    known="$(baseline_entries "$baseline")" || exit 2
+    new="$(awk -F'\t' "$NEW_PROGRAM" <(printf '%s\n' "$known") <(printf '%s\n' "$all"))"
+    stale="$(awk -F'\t' -v tool="$tool" "$STALE_PROGRAM" <(printf '%s\n' "$all") <(printf '%s\n' "$known"))"
+    total=0; count=0
+    [[ -z "$all" ]] || total="$(printf '%s\n' "$all" | wc -l)"
+    [[ -z "$new" ]] || count="$(printf '%s\n' "$new" | wc -l)"
+    if [[ -n "$out" ]]; then
+        printf '%s' "$new" | jq -R -s --arg tool "$tool" "$SARIF_PROGRAM" > "$out" \
+            || die "cannot write $out"
+    fi
+    echo "$tool: $total findings, $((total - count)) in the baseline, $count new"
+    if [[ -n "$stale" ]]; then
+        echo "$tool: $(printf '%s\n' "$stale" | wc -l) baseline entries match nothing any more and can be removed:"
+        printf '%s\n' "$stale" | sed 's/^/  /'
+    fi
+    [[ -n "$new" ]] || return 0
+    local fp rule path line severity message
+    while IFS=$'\t' read -r fp rule path line severity message; do
+        echo "::error file=$path,line=$line,title=$tool $rule ($severity)::$message"
+        echo "  baseline entry, if it is not a risk: $fp <why>"
+    done <<< "$new"
+    return 1
+}
+
+write() {
+    local all
+    all="$(findings "$1" "$2")" || exit 2
+    [[ -n "$all" ]] || return 0
+    printf '%s\n' "$all" | awk -F'\t' "$WRITE_PROGRAM"
+}
+
+[[ $# -ge 1 ]] || die "usage: security-baseline targets|check|write ..."
+command -v jq >/dev/null || die "jq is required"
+cmd="$1"
+shift
+case "$cmd" in
+    targets)
+        [[ $# -eq 1 ]] || die "usage: security-baseline targets python|shell"
+        targets "$1"
+        ;;
+    check)
+        [[ $# -ge 3 && $# -le 4 ]] \
+            || die "usage: security-baseline check TOOL REPORT BASELINE [SARIF]"
+        check "$@"
+        ;;
+    write)
+        [[ $# -eq 2 ]] || die "usage: security-baseline write TOOL REPORT"
+        write "$@"
+        ;;
+    *) die "unknown command '$cmd' (targets, check or write)" ;;
+esac
