@@ -173,7 +173,7 @@ jobs:
       # bin/lxc-trixie-inputs and bin/unprivileged-lxc, from main like the
       # appliance gate's tooling (tooling_ref, profile/WORKFLOWS.md).
       - name: Check out this workflow's tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: keel-linux/.github
           ref: ${{ inputs.tooling_ref }}
@@ -186,13 +186,13 @@ jobs:
 
       # No credentials stay in src/.git/config: the tree is copied into the
       # container whole, and a directory of it may be uploaded.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: ${{ inputs.fetch-depth }}
           path: src
           persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: inputs.download != ''
         with:
           name: ${{ inputs.download }}
@@ -282,7 +282,7 @@ jobs:
             tar -C "/src/$ARTIFACT_DIR" -cf - . < /dev/null | tar -C "$OUT" -xf -
           find "$OUT" -type f -printf '%P  %s bytes\n' | sort | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: inputs.artifact-dir != ''
         with:
           name: ${{ inputs.artifact-name }}
