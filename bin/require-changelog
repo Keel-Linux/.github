@@ -19,7 +19,7 @@
 # code was on master, the gate was green, and the image did not have it.
 set -uo pipefail
 
-EXEMPT_DEFAULT='^(tests/|docs/|\.github/|README|COVERAGE\.md|LICENSE|\.gitignore)'
+EXEMPT_DEFAULT='^(tests/|docs/|\.github/|\.forgejo/|README|COVERAGE\.md|LICENSE|\.gitignore)'
 
 die() {
     echo "require-changelog: $2" >&2

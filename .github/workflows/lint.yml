@@ -26,14 +26,13 @@ env:
 
 jobs:
   actionlint:
-    runs-on: ubuntu-latest
+    runs-on: keel-host
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - name: Install shellcheck
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
+          keel-need-packages shellcheck
       - name: Install the pinned actionlint
         run: |
           curl -fsSL -o actionlint.tar.gz \

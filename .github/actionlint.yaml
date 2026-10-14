@@ -1,3 +1,11 @@
+# actionlint on git.pop.coop (decision 0056): the labels of the Keel
+# Forgejo runners, and the artifact actions of code.forgejo.org, which a
+# workflow names by full URL.
 self-hosted-runner:
   labels:
+    - keel-host
     - keel-lxc
+paths:
+  .github/workflows/**/*.{yml,yaml}:
+    ignore:
+      - 'specifying action "https://code\.forgejo\.org/forgejo/(upload|download)-artifact@v4" in invalid format'

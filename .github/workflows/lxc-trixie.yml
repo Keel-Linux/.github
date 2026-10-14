@@ -132,7 +132,7 @@ jobs:
       github.event_name == 'pull_request_target' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name != github.repository)
-    runs-on: ubuntu-latest
+    runs-on: keel-host
     timeout-minutes: 5
     steps:
       - name: Refuse to run a fork's pull request on keel-lxc-1
@@ -192,7 +192,7 @@ jobs:
           path: src
           persist-credentials: false
 
-      - uses: actions/download-artifact@v8
+      - uses: https://code.forgejo.org/forgejo/download-artifact@v4
         if: inputs.download != ''
         with:
           name: ${{ inputs.download }}
@@ -282,7 +282,7 @@ jobs:
             tar -C "/src/$ARTIFACT_DIR" -cf - . < /dev/null | tar -C "$OUT" -xf -
           find "$OUT" -type f -printf '%P  %s bytes\n' | sort | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v7
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         if: inputs.artifact-dir != ''
         with:
           name: ${{ inputs.artifact-name }}
