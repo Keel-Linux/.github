@@ -36,7 +36,7 @@ permissions:
 
 jobs:
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: keel-host
     timeout-minutes: 30
     env:
       COVERAGE_THRESHOLD: ${{ inputs.threshold }}
@@ -71,8 +71,7 @@ jobs:
       - name: Negations that assert
         run: |
           command -v shellcheck >/dev/null 2>&1 || {
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq shellcheck
+            keel-need-packages shellcheck
           }
           status=0
           git ls-files -z '*.bats' \
@@ -144,34 +143,20 @@ jobs:
       - name: Install bats, shellcheck and the kcov build dependencies
         if: steps.script.outputs.present == 'true'
         run: |
-          sudo apt-get update -qq
           # shellcheck disable=SC2086  # APT_PACKAGES is a space separated list
-          sudo apt-get install -y -qq bats shellcheck file cmake binutils-dev \
+          keel-need-packages bats shellcheck file cmake binutils-dev \
             libssl-dev libcurl4-openssl-dev libelf-dev libdw-dev libiberty-dev \
             zlib1g-dev $APT_PACKAGES
-      - name: Restore kcov from the cache
-        if: steps.script.outputs.present == 'true'
-        id: kcov-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/kcov
-          key: kcov-${{ env.KCOV_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}
-      - name: Build kcov from the pinned release tarball
-        if: steps.script.outputs.present == 'true' && steps.kcov-cache.outputs.cache-hit != 'true'
-        run: |
-          curl -fsSL -o kcov.tar.gz \
-            "https://github.com/SimonKagstrom/kcov/archive/refs/tags/v$KCOV_VERSION.tar.gz"
-          echo "$KCOV_SHA256  kcov.tar.gz" | sha256sum -c -
-          tar xzf kcov.tar.gz
-          cmake -S "kcov-$KCOV_VERSION" -B kcov-build -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$HOME/kcov"
-          cmake --build kcov-build --parallel "$(nproc)"
-          cmake --install kcov-build
-      - name: Put kcov on PATH
+      - name: Check the kcov of the runner host
         if: steps.script.outputs.present == 'true'
         run: |
-          echo "$HOME/kcov/bin" >> "$GITHUB_PATH"
-          "$HOME/kcov/bin/kcov" --version
+          # On git.pop.coop the runner host has the Debian kcov of the pinned
+          # version (decision 0056), so nothing is built or cached here.
+          kcov --version
+          kcov --version | grep -q "^kcov $KCOV_VERSION\b" || {
+            echo "::error::the runner host has no kcov $KCOV_VERSION"
+            exit 1
+          }
       - name: Static analysis (advisory)
         if: steps.script.outputs.present == 'true'
         run: |
@@ -189,7 +174,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
-      - uses: actions/upload-artifact@v7
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         if: always() && steps.script.outputs.present == 'true'
         with:
           name: coverage-report

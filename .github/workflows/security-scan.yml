@@ -42,12 +42,9 @@
 # Nothing of the repository is executed: the scanners only read it.
 #
 # Each scanning job has contents: read alone and leaves its findings as SARIF
-# in an artifact; only the upload job has security-events: write, and it runs
-# where code scanning exists: a public repository (code scanning is not
-# available to private repositories on the free plan) and not a pull request
-# from a fork (whose token cannot write security events anyway). The SARIF
-# holds the findings outside the baseline only, so the code scanning alerts of
-# the default branch are the findings still waiting for a decision.
+# in an artifact. On git.pop.coop (decision 0056) there is no code scanning,
+# so nothing uploads the SARIF: a finding outside the baseline fails its job,
+# and the artifact holds the details.
 name: security-scan
 
 on:
@@ -90,7 +87,7 @@ env:
 
 jobs:
   gitleaks:
-    runs-on: ubuntu-latest
+    runs-on: keel-host
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -139,7 +136,7 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
-      - uses: actions/upload-artifact@v7
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         if: always()
         with:
           name: sarif-gitleaks
@@ -147,7 +144,7 @@ jobs:
           if-no-files-found: ignore
 
   bandit:
-    runs-on: ubuntu-latest
+    runs-on: keel-host
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -160,9 +157,10 @@ jobs:
           ref: ${{ inputs.tooling-ref }}
           path: .keel-ci
           persist-credentials: false
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
+      - name: Python in a virtual environment (the system python3 of the runner host)
+        run: |
+          python3 -m venv --system-site-packages "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Install the pinned bandit
         run: python -m pip install --quiet "bandit==$BANDIT_VERSION"
       - name: Python findings outside the baseline
@@ -194,7 +192,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
-      - uses: actions/upload-artifact@v7
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         if: always()
         with:
           name: sarif-bandit
@@ -202,7 +200,7 @@ jobs:
           if-no-files-found: ignore
 
   semgrep:
-    runs-on: ubuntu-latest
+    runs-on: keel-host
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -215,9 +213,10 @@ jobs:
           ref: ${{ inputs.tooling-ref }}
           path: .keel-ci
           persist-credentials: false
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
+      - name: Python in a virtual environment (the system python3 of the runner host)
+        run: |
+          python3 -m venv --system-site-packages "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Install the pinned semgrep
         run: python -m pip install --quiet "semgrep==$SEMGREP_VERSION"
       - name: Findings outside the baseline
@@ -257,7 +256,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
-      - uses: actions/upload-artifact@v7
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         if: always()
         with:
           name: sarif-semgrep
@@ -265,7 +264,7 @@ jobs:
           if-no-files-found: ignore
 
   shellcheck:
-    runs-on: ubuntu-latest
+    runs-on: keel-host
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -332,52 +331,10 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
-      - uses: actions/upload-artifact@v7
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         if: always()
         with:
           name: sarif-shellcheck
           path: ${{ runner.temp }}/sarif
           if-no-files-found: ignore
 
-  upload:
-    needs: [gitleaks, bandit, semgrep, shellcheck]
-    if: >-
-      always()
-      && github.event.repository.visibility == 'public'
-      && (github.event_name != 'pull_request'
-          || github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      security-events: write
-    strategy:
-      fail-fast: false
-      matrix:
-        tool: [gitleaks, bandit, semgrep, shellcheck]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        id: download
-        continue-on-error: true
-        with:
-          name: sarif-${{ matrix.tool }}
-          path: ${{ runner.temp }}/sarif
-      - name: Look for the SARIF
-        id: sarif
-        env:
-          FILE: ${{ runner.temp }}/sarif/${{ matrix.tool }}.sarif
-          TOOL: ${{ matrix.tool }}
-        run: |
-          if [ -s "$FILE" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::no SARIF from $TOOL (nothing scanned, or skipped)"
-          fi
-      - uses: github/codeql-action/upload-sarif@v4
-        if: steps.sarif.outputs.present == 'true'
-        with:
-          sarif_file: ${{ runner.temp }}/sarif/${{ matrix.tool }}.sarif
-          category: security-scan/${{ matrix.tool }}

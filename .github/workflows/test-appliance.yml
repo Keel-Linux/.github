@@ -182,7 +182,7 @@ jobs:
       github.event_name == 'pull_request_target' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name != github.repository)
-    runs-on: ubuntu-latest
+    runs-on: keel-host
     timeout-minutes: 5
     steps:
       - name: Refuse to boot a fork's pull request on keel-lxc-1
@@ -390,7 +390,7 @@ jobs:
 
       # The pull request's packages, which bin/upgrade-rootfs installs in
       # the container after the upgrade. bin/unprivileged-lxc reads them from ULX_DEBS.
-      - uses: actions/download-artifact@v8
+      - uses: https://code.forgejo.org/forgejo/download-artifact@v4
         if: steps.layer.outputs.published == 'true' && inputs.package_artifact != ''
         with:
           name: ${{ inputs.package_artifact }}

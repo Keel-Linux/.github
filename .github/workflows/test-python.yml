@@ -33,7 +33,7 @@ permissions:
 
 jobs:
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: keel-host
     timeout-minutes: 30
     env:
       THRESHOLD: ${{ inputs.threshold }}
@@ -42,15 +42,15 @@ jobs:
       APT_PACKAGES: ${{ inputs.apt-packages }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: ${{ inputs.python-version }}
+      - name: Python in a virtual environment (the system python3 of the runner host)
+        run: |
+          python3 -m venv --system-site-packages "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Install test tools
         run: |
           if [ -n "$APT_PACKAGES" ]; then
-            sudo apt-get update -qq
             # shellcheck disable=SC2086  # a space separated list of packages
-            sudo apt-get install -y -qq $APT_PACKAGES
+            keel-need-packages $APT_PACKAGES
           fi
           python -m pip install --quiet pytest coverage pyyaml
           if [ -f pyproject.toml ]; then
@@ -71,7 +71,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
-      - uses: actions/upload-artifact@v7
+      - uses: https://code.forgejo.org/forgejo/upload-artifact@v4
         if: always()
         with:
           name: coverage-report
