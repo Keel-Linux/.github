@@ -49,6 +49,8 @@ script() {
 @test "documentation, CI, README, coverage, licence and gitignore need no entry" {
     printf 'docs\n' > docs/guide.md
     printf 'ci\n' > .github/workflows/tests.yml
+    mkdir -p .forgejo/workflows
+    printf 'ci\n' > .forgejo/workflows/tests.yml
     printf 'readme\n' > README.md
     printf 'cov\n' > COVERAGE.md
     printf 'licence\n' > LICENSE
