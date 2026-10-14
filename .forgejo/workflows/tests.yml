@@ -1,0 +1,20 @@
+# Forgejo copy of .github/workflows/tests.yml (decision 0056): the same
+# jobs, with a runs-on line on each call of a reusable workflow,
+# because Forgejo runs a called workflow on the runner of the caller.
+# The gate of this repository, beside the actionlint one (docs/ci-cd.md):
+#   tests / coverage   tests/coverage.sh: the bats suite of bin/ under kcov,
+#                      100 percent, the number measured on main. The tools
+#                      here run in every other repository's gate, so they are
+#                      tested here rather than in the workflows that call them.
+# Required on main. Thresholds are only ever raised.
+name: tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  tests:
+    runs-on: keel-host
+    uses: ./.github/workflows/test-shell.yml
+    with:
+      threshold: 100

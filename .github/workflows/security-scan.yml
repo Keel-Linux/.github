@@ -295,8 +295,14 @@ jobs:
               # The caller's own file is not evidence: it names this job.
               caller="${CALLER_REF#*/*/}"
               caller="${caller%@*}"
+              # The caller and its twin: a .forgejo/workflows file is a
+              # copy of the .github/workflows file of the same name.
+              twin=".github/workflows/${caller##*/}"
               others=$(git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml' \
-                | grep -vxF "$caller" | xargs -r grep -lw shellcheck || true)
+                  '.forgejo/workflows/*.yml' '.forgejo/workflows/*.yaml' \
+                | grep -vxF -e "$caller" -e "$twin" \
+                | grep -vxF ".forgejo/workflows/${caller##*/}" \
+                | xargs -r grep -lw shellcheck || true)
               if [ -n "$others" ]; then
                 {
                   echo "## shellcheck: skipped, the repository already runs it"
