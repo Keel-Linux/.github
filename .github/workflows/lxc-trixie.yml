@@ -262,9 +262,21 @@ jobs:
               | ct sh -c 'cat > /etc/apt/sources.list.d/trixie-backports.list'
           fi
 
+      # Forgejo stops a task that sends no log line for 10 minutes
+      # (ZOMBIE_TASK_TIMEOUT of git.pop.coop, the default): it archives the
+      # log and marks the job failed while the commands still run. A pytest
+      # run with -q prints nothing until its line of dots is full, and one
+      # netns driver runs for up to 10 minutes. Thus a line every minute
+      # keeps the task alive (Keel-Linux/keel#177).
       - name: Run the commands in the container
         run: |
           set -euo pipefail
+          started=$(date +%s)
+          ( while sleep 60 > /dev/null 2>&1; do
+              echo "keel-ci: the commands still run, $(( ($(date +%s) - started) / 60 )) min"
+            done ) &
+          beat=$!
+          trap 'kill "$beat" 2>/dev/null || true' EXIT
           systemd-run --user --scope --quiet -- \
             lxc-attach -P "$SCRATCH/lxc" -n "$NAME" --clear-env -- \
             env HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
