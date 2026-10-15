@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Python in a virtual environment (the system python3 of the runner host)
         run: |
-          python3 -m venv --system-site-packages "$RUNNER_TEMP/venv"
+          python3 -m venv "$RUNNER_TEMP/venv"
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Install test tools
         run: |
