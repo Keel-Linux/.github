@@ -1,0 +1,201 @@
+# Reusable, light CI on GitHub-hosted runners (decision 0056).
+#
+# The repositories call this workflow from .github/workflows for pull
+# requests on the GitHub mirror. The full CI is .forgejo/workflows on
+# git.pop.coop, where lxc-trixie.yml runs the same commands in a Debian
+# trixie system container. This workflow has the same inputs, so a caller
+# changes only the file name.
+#
+# The job runs in a debian:trixie container on an ubuntu-latest runner. It
+# installs git, checks out the repository (fetch-depth decides how much
+# history), and copies the tree, .git included, to /src, owned by root.
+# The commands run in /src as root, with bash -euo pipefail, stdin closed,
+# and only HOME=/root, PATH, DEBIAN_FRONTEND=noninteractive, LANG=C.UTF-8,
+# CI=true and WORKSPACE=/src in the environment. Whatever the commands
+# need, they install in the container. The runner throws the container
+# away at the end.
+#
+# This container has no systemd of its own. A caller that sets systemd:
+# true needs a system container, so its job stays on Forgejo; here the job
+# fails at once with that reason.
+#
+# The job uses no secret, has contents: read only and keeps no
+# credentials. A caller job named "build" makes the check "build / trixie".
+name: github-debian-build
+
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: >-
+          Shell commands to run in /src as root in the container. Set
+          exactly one of run and script.
+        required: false
+        type: string
+        default: ""
+      script:
+        description: >-
+          Path, relative to the repository root, of a script to run with
+          bash in /src as root in the container. Set exactly one of run and
+          script.
+        required: false
+        type: string
+        default: ""
+      systemd:
+        description: >-
+          True needs a container with its own systemd. This workflow cannot
+          give one, so true fails the job. Keep such a job on Forgejo.
+        required: false
+        type: boolean
+        default: false
+      backports:
+        description: enable trixie-backports in the container before the commands run
+        required: false
+        type: boolean
+        default: false
+      fetch-depth:
+        description: history to check out, as actions/checkout; 0 is all of it, which gbp needs
+        required: false
+        type: number
+        default: 1
+      download:
+        description: name of an artifact of this run to put in /src/<download-dir> before the commands run
+        required: false
+        type: string
+        default: ""
+      download-dir:
+        description: directory, relative to /src, for the downloaded artifact
+        required: false
+        type: string
+        default: dist
+      artifact-dir:
+        description: >-
+          Directory, relative to /src, whose contents the job uploads as
+          the artifact artifact-name after the commands succeed. Empty
+          uploads nothing. An empty or missing directory fails the job.
+        required: false
+        type: string
+        default: ""
+      artifact-name:
+        description: name of the uploaded artifact
+        required: false
+        type: string
+        default: trixie
+      timeout:
+        description: minutes before the job is cancelled
+        required: false
+        type: number
+        default: 60
+      tooling_ref:
+        description: >-
+          Not used here. It exists so that a caller of lxc-trixie.yml can
+          call this workflow with the same inputs.
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  trixie:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    timeout-minutes: ${{ inputs.timeout }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUN: ${{ inputs.run }}
+      SCRIPT: ${{ inputs.script }}
+      SYSTEMD: ${{ inputs.systemd }}
+      BACKPORTS: ${{ inputs.backports }}
+      DOWNLOAD_DIR: ${{ inputs.download-dir }}
+      ARTIFACT_DIR: ${{ inputs.artifact-dir }}
+    steps:
+      - name: Check the inputs
+        run: |
+          set -eu
+          fail() { echo "::error::$1"; exit 1; }
+          if [ "$SYSTEMD" = true ]; then
+            fail "systemd: true needs a system container with its own systemd; this job runs on Forgejo only (.forgejo/workflows, lxc-trixie.yml)"
+          fi
+          if [ -n "$RUN" ] && [ -n "$SCRIPT" ]; then
+            fail "set exactly one of run and script, not both"
+          fi
+          if [ -z "$RUN" ] && [ -z "$SCRIPT" ]; then
+            fail "set exactly one of run and script"
+          fi
+          for pair in "artifact-dir:$ARTIFACT_DIR" "download-dir:$DOWNLOAD_DIR" "script:$SCRIPT"; do
+            name="${pair%%:*}"
+            value="${pair#*:}"
+            [ -n "$value" ] || continue
+            case "/$value/" in
+              //*|*/../*|/./) fail "$name must be a path relative to /src, not '$value'" ;;
+            esac
+          done
+
+      - name: Install git
+        run: |
+          set -eu
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates git
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+          path: src
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.download != ''
+        with:
+          name: ${{ inputs.download }}
+          path: src/${{ inputs.download-dir }}
+
+      - name: Copy the repository and the commands to /src
+        run: |
+          set -eu
+          mkdir -p /src /root/.keel-ci
+          cp -a src/. /src/
+          chown -R root:root /src
+          HOME=/root git config --global --add safe.directory '*'
+          if [ -n "$RUN" ]; then
+            printf '%s\n' "$RUN" > /root/.keel-ci/run
+          else
+            printf 'exec bash /src/%q\n' "$SCRIPT" > /root/.keel-ci/run
+          fi
+          if [ "$BACKPORTS" = true ]; then
+            echo 'deb http://deb.debian.org/debian trixie-backports main' \
+              > /etc/apt/sources.list.d/trixie-backports.list
+          fi
+
+      - name: Run the commands in the container
+        run: |
+          env -i HOME=/root PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+              LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive CI=true WORKSPACE=/src \
+            sh -c 'cd /src && exec bash -euo pipefail /root/.keel-ci/run' < /dev/null
+
+      - name: Copy the artifact out
+        if: inputs.artifact-dir != ''
+        run: |
+          set -eu
+          # Under the workspace, because the path of runner.temp on the
+          # host is not the path in the container.
+          out="$GITHUB_WORKSPACE/keel-trixie-out"
+          rm -rf "$out"
+          mkdir -p "$out"
+          if [ ! -d "/src/$ARTIFACT_DIR" ]; then
+            echo "::error::the commands made no directory /src/$ARTIFACT_DIR"
+            exit 1
+          fi
+          cp -a "/src/$ARTIFACT_DIR/." "$out/"
+          find "$out" -type f -printf '%P  %s bytes\n' | sort | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: inputs.artifact-dir != ''
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: keel-trixie-out/
+          if-no-files-found: error

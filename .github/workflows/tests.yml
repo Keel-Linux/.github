@@ -1,16 +1,21 @@
-# The gate of this repository, beside the actionlint one (docs/ci-cd.md):
-#   tests / coverage   tests/coverage.sh: the bats suite of bin/ under kcov,
-#                      100 percent, the number measured on main. The tools
-#                      here run in every other repository's gate, so they are
-#                      tested here rather than in the workflows that call them.
-# Required on main. Thresholds are only ever raised.
+# Light CI on GitHub-hosted runners, for pull requests on the GitHub mirror
+# (decision 0056). The full CI is .forgejo/workflows on git.pop.coop, and
+# the coverage gate (100 percent) is there.
+#
+# tests/coverage.sh: the bats suite of bin/ under kcov. Here the tests must
+# pass; the coverage threshold is not enforced. The call goes to the file in
+# the working tree, so a pull request that changes github-test-shell.yml is
+# tested by its own version.
 name: tests
+
 on:
   pull_request:
-  push:
-    branches: [main]
+
+permissions:
+  contents: read
+
 jobs:
   tests:
-    uses: keel-linux/.github/.github/workflows/test-shell.yml@main
+    uses: ./.github/workflows/github-test-shell.yml
     with:
       threshold: 100

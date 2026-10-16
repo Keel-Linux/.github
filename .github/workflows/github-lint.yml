@@ -1,0 +1,58 @@
+# Reusable, light CI on GitHub-hosted runners (decision 0056).
+#
+# A repository calls this workflow from .github/workflows for pull requests
+# on the GitHub mirror. The full CI is .forgejo/workflows on git.pop.coop.
+# actionlint checks each workflow of .github/workflows: the expressions,
+# the runner labels (the repository's .github/actionlint.yaml declares
+# extra labels) and the action inputs, and shellcheck checks each run
+# block. Each report fails the job. actionlint is pinned by version and by
+# SHA-256. A caller job named "lint" makes the check "lint / actionlint".
+# The job uses no secret and has contents: read only.
+name: github-lint
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  ACTIONLINT_VERSION: 1.7.7
+  ACTIONLINT_SHA256: 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+      - name: Install the pinned actionlint
+        run: |
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "$ACTIONLINT_SHA256  actionlint.tar.gz" | sha256sum -c -
+          tar xzf actionlint.tar.gz actionlint
+          ./actionlint --version
+      - name: Lint the workflows
+        run: |
+          set -o pipefail
+          status=0
+          ./actionlint -color .github/workflows/*.yml 2>&1 | tee actionlint.txt || status=$?
+          {
+            echo "## actionlint $ACTIONLINT_VERSION"
+            echo '```'
+            if [ -s actionlint.txt ]; then
+              tail -n 40 actionlint.txt
+            else
+              count=$(find .github/workflows -maxdepth 1 -name '*.yml' | wc -l)
+              echo "no findings in $count workflows"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

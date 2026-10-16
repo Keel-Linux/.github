@@ -1,0 +1,315 @@
+# Reusable, light CI on GitHub-hosted runners (decision 0056).
+#
+# The repositories call this workflow from .github/workflows for pull
+# requests on the GitHub mirror. The full CI is .forgejo/workflows on
+# git.pop.coop. A caller job named "security" makes the checks
+# "security / gitleaks", "security / bandit", "security / semgrep" and
+# "security / shellcheck".
+#
+#   gitleaks    secrets in the commits of the pull request, pinned by
+#               version and SHA-256, with --redact. The repository's
+#               .github/gitleaks.toml and .github/.gitleaksignore apply.
+#   bandit      Python, medium severity and higher.
+#   semgrep     p/python, r/bash and p/secrets, and p/javascript,
+#               p/typescript, p/golang or p/php for the languages that the
+#               repository has; WARNING and ERROR. Metrics are off.
+#   shellcheck  every shell script, warning and higher. With the input
+#               shellcheck: auto, the job does not run when a different
+#               workflow of the repository already runs shellcheck.
+#
+# The repository's .github/security-baseline lists the accepted findings
+# of bandit, semgrep and shellcheck. bin/security-baseline of
+# keel-linux/.github compares, and a finding that is not in the baseline
+# fails the job. The jobs keep their reports as artifacts. They do not
+# upload SARIF to code scanning. The jobs use no secret, have contents:
+# read only and keep no credentials. The scanners only read the tree.
+name: github-security-scan
+
+on:
+  workflow_call:
+    inputs:
+      baseline:
+        description: the baseline file of bandit, semgrep and shellcheck findings
+        required: false
+        type: string
+        default: .github/security-baseline
+      shellcheck:
+        description: >-
+          auto runs shellcheck unless a workflow of the repository other than
+          the caller already mentions shellcheck; always; never
+        required: false
+        type: string
+        default: auto
+      semgrep-configs:
+        description: extra semgrep configs, space separated, beside the defaults
+        required: false
+        type: string
+        default: ""
+      tooling-ref:
+        description: >-
+          the ref of keel-linux/.github whose bin/security-baseline runs;
+          this repository's own caller passes its head commit, everyone
+          else keeps main
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  SEMGREP_VERSION: 1.179.0
+  BANDIT_VERSION: 1.9.4
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the pinned gitleaks
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" version
+      - name: Secrets in the commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/sarif"
+          if [ -n "$BASE" ]; then
+            range="$BASE..$HEAD"
+            scope="the commits of the pull request ($range)"
+          else
+            range=""
+            scope="the whole history"
+          fi
+          config=()
+          if [ -f .github/gitleaks.toml ]; then
+            config=(--config .github/gitleaks.toml)
+          fi
+          status=0
+          "$RUNNER_TEMP/gitleaks" git . --redact --no-banner --no-color --exit-code 1 \
+            "${config[@]}" --gitleaks-ignore-path .github --log-opts="$range" \
+            --report-format sarif --report-path "$RUNNER_TEMP/sarif/gitleaks.sarif" \
+            2>&1 | tee "$RUNNER_TEMP/gitleaks.txt" || status=$?
+          {
+            echo "## gitleaks $GITLEAKS_VERSION: $scope"
+            echo '```'
+            tail -n 20 "$RUNNER_TEMP/gitleaks.txt"
+            echo '```'
+            if [ "$status" -ne 0 ]; then
+              echo "A real secret must be revoked, not only removed. A fixture goes in"
+              echo ".github/gitleaks.toml, a false positive in .github/.gitleaksignore"
+              echo "with a comment."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: security-report-gitleaks
+          path: ${{ runner.temp }}/sarif
+          if-no-files-found: ignore
+
+  bandit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the shared tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: keel-linux/.github
+          ref: ${{ inputs.tooling-ref }}
+          path: .keel-ci
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install the pinned bandit
+        run: python -m pip install --quiet "bandit==$BANDIT_VERSION"
+      - name: Python findings outside the baseline
+        env:
+          BASELINE: ${{ inputs.baseline }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/sarif"
+          .keel-ci/bin/security-baseline targets python > "$RUNNER_TEMP/python.lst"
+          count=$(tr -cd '\0' < "$RUNNER_TEMP/python.lst" | wc -c)
+          if [ "$count" -eq 0 ]; then
+            echo "## bandit: no Python files outside tests" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          mapfile -d '' files < "$RUNNER_TEMP/python.lst"
+          # bandit exits 1 when it finds anything; the baseline decides.
+          bandit --quiet --severity-level medium -f json \
+            -o "$RUNNER_TEMP/bandit.json" "${files[@]}" || true
+          jq -r '.errors[] | "::warning file=\(.filename)::bandit could not scan it: \(.reason)"' \
+            "$RUNNER_TEMP/bandit.json"
+          status=0
+          .keel-ci/bin/security-baseline check bandit "$RUNNER_TEMP/bandit.json" \
+            "$BASELINE" "$RUNNER_TEMP/sarif/bandit.sarif" \
+            2>&1 | tee "$RUNNER_TEMP/bandit.txt" || status=$?
+          {
+            echo "## bandit $BANDIT_VERSION: $count Python files, medium and above"
+            echo '```'
+            grep -v '^::' "$RUNNER_TEMP/bandit.txt" | tail -n 40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: security-report-bandit
+          path: ${{ runner.temp }}/sarif
+          if-no-files-found: ignore
+
+  semgrep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the shared tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: keel-linux/.github
+          ref: ${{ inputs.tooling-ref }}
+          path: .keel-ci
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Install the pinned semgrep
+        run: python -m pip install --quiet "semgrep==$SEMGREP_VERSION"
+      - name: Findings outside the baseline
+        env:
+          BASELINE: ${{ inputs.baseline }}
+          EXTRA_CONFIGS: ${{ inputs.semgrep-configs }}
+          SEMGREP_SEND_METRICS: "off"
+          SEMGREP_ENABLE_VERSION_CHECK: "0"
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/sarif"
+          configs=(p/python r/bash p/secrets)
+          has() { git ls-files -- "$@" | grep -q .; }
+          if has '*.js' '*.mjs' '*.cjs' '*.jsx'; then configs+=(p/javascript); fi
+          if has '*.ts' '*.tsx'; then configs+=(p/typescript); fi
+          if has '*.go'; then configs+=(p/golang); fi
+          if has '*.php'; then configs+=(p/php); fi
+          read -r -a extra <<< "$EXTRA_CONFIGS"
+          configs+=("${extra[@]}")
+          args=()
+          for config in "${configs[@]}"; do args+=(--config "$config"); done
+          echo "configs: ${configs[*]}"
+          semgrep scan --metrics=off --disable-version-check --quiet \
+            "${args[@]}" --severity WARNING --severity ERROR \
+            --json --output "$RUNNER_TEMP/semgrep.json" .
+          jq -r '.errors[] | select(.level == "error")
+                 | "::warning::semgrep: \(.message | gsub("\n"; " ") | .[0:300])"' \
+            "$RUNNER_TEMP/semgrep.json"
+          status=0
+          .keel-ci/bin/security-baseline check semgrep "$RUNNER_TEMP/semgrep.json" \
+            "$BASELINE" "$RUNNER_TEMP/sarif/semgrep.sarif" \
+            2>&1 | tee "$RUNNER_TEMP/semgrep.txt" || status=$?
+          {
+            echo "## semgrep $SEMGREP_VERSION: ${configs[*]}"
+            echo '```'
+            grep -v '^::' "$RUNNER_TEMP/semgrep.txt" | tail -n 40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: security-report-semgrep
+          path: ${{ runner.temp }}/sarif
+          if-no-files-found: ignore
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the shared tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: keel-linux/.github
+          ref: ${{ inputs.tooling-ref }}
+          path: .keel-ci
+          persist-credentials: false
+      - name: Shell findings outside the baseline
+        env:
+          BASELINE: ${{ inputs.baseline }}
+          MODE: ${{ inputs.shellcheck }}
+          CALLER_REF: ${{ github.workflow_ref }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/sarif"
+          case "$MODE" in
+            always) ;;
+            never)
+              echo "## shellcheck: off (input shellcheck: never)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+            auto)
+              # The caller's own file is not evidence: it names this job.
+              caller="${CALLER_REF#*/*/}"
+              caller="${caller%@*}"
+              others=$(git ls-files '.github/workflows/*.yml' '.github/workflows/*.yaml' \
+                | grep -vxF "$caller" | xargs -r grep -lw shellcheck || true)
+              if [ -n "$others" ]; then
+                {
+                  echo "## shellcheck: skipped, the repository already runs it"
+                  echo "$others"
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              ;;
+            *)
+              echo "::error::shellcheck must be auto, always or never, not '$MODE'"
+              exit 2
+              ;;
+          esac
+          .keel-ci/bin/security-baseline targets shell > "$RUNNER_TEMP/shell.lst"
+          count=$(tr -cd '\0' < "$RUNNER_TEMP/shell.lst" | wc -c)
+          if [ "$count" -eq 0 ]; then
+            echo "## shellcheck: no shell scripts outside tests" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          mapfile -d '' files < "$RUNNER_TEMP/shell.lst"
+          # It exits 1 when it finds anything; the baseline decides.
+          shellcheck -f json1 -S warning "${files[@]}" \
+            > "$RUNNER_TEMP/shellcheck.json" || true
+          status=0
+          .keel-ci/bin/security-baseline check shellcheck "$RUNNER_TEMP/shellcheck.json" \
+            "$BASELINE" "$RUNNER_TEMP/sarif/shellcheck.sarif" \
+            2>&1 | tee "$RUNNER_TEMP/shellcheck.txt" || status=$?
+          {
+            echo "## shellcheck $(shellcheck --version | sed -n 's/^version: //p'): $count scripts, warning and above"
+            echo '```'
+            grep -v '^::' "$RUNNER_TEMP/shellcheck.txt" | tail -n 40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: security-report-shellcheck
+          path: ${{ runner.temp }}/sarif
+          if-no-files-found: ignore
