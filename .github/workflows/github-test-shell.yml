@@ -1,0 +1,182 @@
+# Reusable, light CI on GitHub-hosted runners (decision 0056).
+#
+# The repositories call this workflow from .github/workflows for pull
+# requests on the GitHub mirror. The full CI is .forgejo/workflows on
+# git.pop.coop, and the coverage gate is there. Here the tests must pass,
+# but the coverage threshold is not enforced: the job gives the script
+# COVERAGE_THRESHOLD=0. A caller job named "tests" makes the check
+# "tests / coverage".
+#
+# The job refuses a bats negation that asserts nothing, as the Forgejo
+# version does. When the repository has no coverage script, the job passes
+# with a notice. The job uses no secret and has contents: read only.
+name: github-test-shell
+
+on:
+  workflow_call:
+    inputs:
+      threshold:
+        description: >-
+          The coverage threshold of the Forgejo gate. Optional here, and
+          not enforced: the light CI only runs the tests.
+        required: false
+        type: number
+        default: 0
+      coverage-script:
+        description: repository script that runs bats under kcov
+        required: false
+        type: string
+        default: tests/coverage.sh
+      apt-packages:
+        description: extra Debian packages that the tests need
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COVERAGE_THRESHOLD: "0"
+      GATE_THRESHOLD: ${{ inputs.threshold }}
+      COVERAGE_SCRIPT: ${{ inputs.coverage-script }}
+      APT_PACKAGES: ${{ inputs.apt-packages }}
+      # Ubuntu (ubuntu-latest) has no kcov package. The job builds kcov 43,
+      # the Debian trixie version, from the pinned tarball and keeps it in
+      # the cache.
+      KCOV_VERSION: "43"
+      KCOV_SHA256: 4cbba86af11f72de0c7514e09d59c7927ed25df7cebdad087f6d3623213b95bf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A bats negation asserts only when it is the last command of the
+      # test. Other negations are inert. shellcheck (SC2314, SC2315) and
+      # the awk program find them.
+      - name: Negations that assert
+        run: |
+          command -v shellcheck >/dev/null 2>&1 || {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq shellcheck
+          }
+          status=0
+          git ls-files -z '*.bats' \
+            | xargs -0 -r shellcheck -f gcc --shell=bash \
+                --severity=error --include=SC2314,SC2315 \
+                > "$RUNNER_TEMP/shellcheck.txt" || status=$?
+          # shellcheck disable=SC2016  # an awk program, expanded by awk
+          git ls-files -z '*.bats' \
+            | xargs -0 -r awk '
+                FNR == 1 { body = 0 }
+                /^@test .*\{[[:space:]]*$/ { body = 1; n = 0; next }
+                body && /^\}[[:space:]]*$/ {
+                  for (i = 1; i < n; i++) if (neg[i])
+                    print FILENAME ":" num[i] ": error: a nested negation that is not on the last line of the test asserts nothing"
+                  body = 0; next
+                }
+                body && !/^[[:space:]]*(#|$)/ {
+                  n++; num[n] = FNR; neg[n] = 0
+                  cmd = $0
+                  sub(/^[[:space:]]+/, "", cmd)
+                  if (cmd ~ /^(if|elif|while|until)[[:space:]]/)
+                    if (!sub(/.*[;[:space:]](then|do)[[:space:]]/, " ", cmd)) next
+                  if (cmd ~ /(^|[;&|{()]|[[:space:]](do|then|else))[[:space:]]*![[:space:]]/ &&
+                      cmd !~ /(^|[;&|{()])[[:space:]]*run[[:space:]]+![[:space:]]/)
+                    neg[n] = 1
+                }' > "$RUNNER_TEMP/nested.txt" || status=$?
+          # shellcheck disable=SC2016  # an awk program, expanded by awk
+          awk -F: 'NR == FNR { seen[$1 ":" $2] = 1; print; next }
+                   !(($1 ":" $2) in seen)' "$RUNNER_TEMP/shellcheck.txt" "$RUNNER_TEMP/nested.txt" \
+            | sort -t: -k1,1 -k2,2n > "$RUNNER_TEMP/inert-negations.txt"
+          if [ -s "$RUNNER_TEMP/inert-negations.txt" ]; then
+            cat "$RUNNER_TEMP/inert-negations.txt"
+            status=1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "::error::a bats negation that is not the last command of its test asserts nothing; write it 'run ! cmd' (needs bats_require_minimum_version 1.5.0)"
+          fi
+          {
+            echo "## Negations that assert"
+            echo '```'
+            if [ -s "$RUNNER_TEMP/inert-negations.txt" ]; then
+              cat "$RUNNER_TEMP/inert-negations.txt"
+            else
+              echo "no inert negations in $(git ls-files '*.bats' | wc -l) bats files"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - name: Check for the coverage script
+        id: script
+        run: |
+          if [ -x "$COVERAGE_SCRIPT" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          elif [ -e "$COVERAGE_SCRIPT" ]; then
+            echo "::error::$COVERAGE_SCRIPT exists but is not executable (git update-index --chmod=+x)"
+            exit 1
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$COVERAGE_SCRIPT is not on this branch, so there are no shell tests to run"
+            {
+              echo "## Tests"
+              echo "No coverage script (\`$COVERAGE_SCRIPT\`) on this branch: no shell tests to run."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Install bats, shellcheck and the kcov build dependencies
+        if: steps.script.outputs.present == 'true'
+        run: |
+          sudo apt-get update -qq
+          # shellcheck disable=SC2086  # APT_PACKAGES is a space separated list
+          sudo apt-get install -y -qq bats shellcheck file cmake binutils-dev \
+            libssl-dev libcurl4-openssl-dev libelf-dev libdw-dev libiberty-dev \
+            zlib1g-dev $APT_PACKAGES
+      - name: Restore kcov from the cache
+        if: steps.script.outputs.present == 'true'
+        id: kcov-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/kcov
+          key: kcov-${{ env.KCOV_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ env.ImageOS }}-${{ env.ImageVersion }}
+      - name: Build kcov from the pinned release tarball
+        if: steps.script.outputs.present == 'true' && steps.kcov-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o kcov.tar.gz \
+            "https://github.com/SimonKagstrom/kcov/archive/refs/tags/v$KCOV_VERSION.tar.gz"
+          echo "$KCOV_SHA256  kcov.tar.gz" | sha256sum -c -
+          tar xzf kcov.tar.gz
+          cmake -S "kcov-$KCOV_VERSION" -B kcov-build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/kcov"
+          cmake --build kcov-build --parallel "$(nproc)"
+          cmake --install kcov-build
+      - name: Put kcov on PATH
+        if: steps.script.outputs.present == 'true'
+        run: |
+          echo "$HOME/kcov/bin" >> "$GITHUB_PATH"
+          "$HOME/kcov/bin/kcov" --version
+      - name: Static analysis (advisory)
+        if: steps.script.outputs.present == 'true'
+        run: |
+          git ls-files | grep -E '^(bin/|tests/|.*\.sh$|.*\.bash$)' | xargs -r file | grep -iE 'shell script|bash' | cut -d: -f1 | xargs -r shellcheck -S warning || true
+      - name: Tests, coverage not enforced
+        if: steps.script.outputs.present == 'true'
+        run: |
+          set -o pipefail
+          status=0
+          "$COVERAGE_SCRIPT" 2>&1 | tee coverage.txt || status=$?
+          {
+            echo "## Tests and coverage (not enforced here; the Forgejo gate is $GATE_THRESHOLD percent)"
+            echo '```'
+            tail -n 20 coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.script.outputs.present == 'true'
+        with:
+          name: coverage-report
+          path: coverage.txt
+          if-no-files-found: ignore

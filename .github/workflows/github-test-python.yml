@@ -1,0 +1,88 @@
+# Reusable, light CI on GitHub-hosted runners (decision 0056).
+#
+# The repositories call this workflow from .github/workflows for pull
+# requests on the GitHub mirror. The full CI is .forgejo/workflows on
+# git.pop.coop, and the coverage gate is there. Here pytest must pass under
+# coverage.py with branch coverage, but the threshold is not enforced: the
+# report is in the summary and in an artifact. A caller job named "tests"
+# makes the check "tests / coverage". The job uses no secret and has
+# contents: read only.
+name: github-test-python
+
+on:
+  workflow_call:
+    inputs:
+      threshold:
+        description: >-
+          The coverage threshold of the Forgejo gate. Optional here, and
+          not enforced: the light CI only runs the tests.
+        required: false
+        type: number
+        default: 0
+      package:
+        description: python package or source directory to measure
+        required: true
+        type: string
+      tests:
+        description: tests directory
+        required: false
+        type: string
+        default: tests
+      python-version:
+        required: false
+        type: string
+        default: "3.13"
+      apt-packages:
+        description: extra Debian packages that the tests need
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      THRESHOLD: ${{ inputs.threshold }}
+      PACKAGE: ${{ inputs.package }}
+      TESTS: ${{ inputs.tests }}
+      APT_PACKAGES: ${{ inputs.apt-packages }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install test tools
+        run: |
+          if [ -n "$APT_PACKAGES" ]; then
+            sudo apt-get update -qq
+            # shellcheck disable=SC2086  # a space separated list of packages
+            sudo apt-get install -y -qq $APT_PACKAGES
+          fi
+          python -m pip install --quiet pytest coverage pyyaml
+          if [ -f pyproject.toml ]; then
+            python -m pip install --quiet -e . || echo "::warning::pip install -e . failed, running from the checkout with PYTHONPATH=."
+          fi
+      - name: Run tests under coverage
+        run: |
+          PYTHONPATH=. python -m coverage run --branch --source="$PACKAGE" -m pytest -q "$TESTS"
+      - name: Coverage report, not enforced
+        run: |
+          python -m coverage report --show-missing | tee coverage.txt
+          {
+            echo "## Coverage (not enforced here; the Forgejo gate is $THRESHOLD percent)"
+            echo '```'
+            tail -n 15 coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.txt
+          if-no-files-found: ignore

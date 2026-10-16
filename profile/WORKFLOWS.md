@@ -5,6 +5,28 @@ of its own, with its threshold. The coverage check is a required status on the
 default branch (per-repository branch protection; the full procedure is in
 docs/ci-cd.md of the keel repository).
 
+## The light CI on GitHub (github-*.yml)
+
+Decision 0056 moves the full CI to `.forgejo/workflows` on git.pop.coop.
+The GitHub mirror keeps a light CI for pull requests from GitHub
+contributors. Each repository's `.github/workflows` has `pull_request` as
+its only trigger, `permissions: contents: read`, and calls the
+`github-*.yml` workflows of this repository. These workflows run on
+GitHub-hosted runners only (`ubuntu-latest`, or a `debian:trixie`
+container on it). They use no secret and upload no SARIF.
+
+| Light workflow | Forgejo workflow | Difference |
+| --- | --- | --- |
+| `github-test-shell.yml` | `test-shell.yml` | The tests must pass. The coverage threshold is optional and not enforced. |
+| `github-test-python.yml` | `test-python.yml` | The tests must pass. The coverage threshold is optional and not enforced. |
+| `github-security-scan.yml` | `security-scan.yml` | No upload to code scanning. The reports are artifacts. A finding outside the baseline fails the job. |
+| `github-require-changelog.yml` | `require-changelog.yml` | None. |
+| `github-debian-build.yml` | `lxc-trixie.yml` | The same inputs, in a `debian:trixie` container. `systemd: true` fails, so such jobs stay on Forgejo. |
+| `github-lint.yml` | the `lint.yml` of this repository | Reusable actionlint. |
+
+`test-appliance.yml` has no light version. The boot tests run on Forgejo
+only.
+
 ## Status check names
 
 GitHub names the check after the caller's job id and the reusable job id:
