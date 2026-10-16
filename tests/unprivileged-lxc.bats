@@ -222,6 +222,21 @@ lxc-start -P /lxc -n box -d'
     [[ "$output" == *"the upgrade says what it does"* ]]
 }
 
+@test "ULX_NO_UPGRADE=1 starts the container as built, with no upgrade boot" {
+    # A staged image is tested as the build host made it (handbook
+    # decision 0061): no archive fetch, no upgrade, the first boot as asked.
+    boot_test 'lxc-start -P /lxc -n box -d'
+
+    ULX_NO_UPGRADE=1 ulx run "$SCRATCH" -- "$TMP/boot-test.sh"
+
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^lxc-start' "$LOG")" -eq 1 ]
+    [ "$(grep -c -- "-s $MASK" "$LOG")" -eq 0 ]
+    [ "$(grep -c '^curl' "$LOG")" -eq 0 ]
+    [ "$(grep -c '^script:' "$LOG")" -eq 0 ]
+    [[ "$output" == *"box: started as built, ULX_NO_UPGRADE=1"* ]]
+}
+
 @test "each container gets its upgrade boot, found by the long options too" {
     boot_test 'lxc-start --lxcpath /lxc --name box -d
 lxc-start --lxcpath=/lxc --name=other -d'

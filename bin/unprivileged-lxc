@@ -57,6 +57,11 @@
 # systemd's first boot. The versions that changed against the published
 # layer go to the log and, under GitHub Actions, to the job summary.
 #
+# ULX_NO_UPGRADE=1 leaves out the upgrade boot: every container starts as
+# built. The staged image gate uses it, because what it promotes is the
+# image as the build host made it, not the image plus the archive
+# (handbook decision 0061).
+#
 # `cleanup` stops the broker and removes SCRATCH, which holds files owned
 # by the subordinate range, through the same namespace.
 set -euo pipefail
@@ -68,6 +73,9 @@ ULX_FORWARDED="lxc-attach lxc-destroy lxc-info lxc-ls lxc-start lxc-stop lxc-wai
 ULX_POLL=${ULX_POLL:-0.1}
 ULX_UPGRADE=${ULX_UPGRADE:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/upgrade-rootfs}
 ULX_DEBS=${ULX_DEBS-}
+# 1 starts every container as built, with no upgrade boot: a staged image
+# is tested as the build host made it (handbook decision 0061).
+ULX_NO_UPGRADE=${ULX_NO_UPGRADE-}
 ULX_MASK="inithooks.service keel-host-keys.service turnkey-init-fence.service systemd-machine-id-commit.service"
 ULX_TRIES=${ULX_TRIES:-90}
 ULX_PAUSE=${ULX_PAUSE:-2}
@@ -344,6 +352,10 @@ ulx_upgrade() {
         return 1
     fi
     [ ! -e "$dir/upgraded/$name.changes" ] || return 0
+    if [ "$ULX_NO_UPGRADE" = 1 ]; then
+        ulx_say "$name: started as built, ULX_NO_UPGRADE=1"
+        return 0
+    fi
     if [ -n "$ULX_DEBS" ] && ! compgen -G "$ULX_DEBS/*.deb" > /dev/null; then
         ulx_say "ULX_DEBS is $ULX_DEBS, which holds no .deb; $name is not started"
         return 1
