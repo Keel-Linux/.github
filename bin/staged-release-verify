@@ -1,0 +1,98 @@
+#!/bin/bash
+# Check a staged release that the build host pushed to the runner, before
+# the runner boots any of it (handbook decision 0061).
+#
+# usage: staged-release-verify DIR MANIFEST_SHA256 KEYRING
+#
+#   DIR              the staged release: MANIFEST, MANIFEST.staging.asc,
+#                    layers/, images/
+#   MANIFEST_SHA256  the sha256 of the MANIFEST, as the build host gave it
+#                    when it dispatched the run
+#   KEYRING          the public staging key, armored or binary
+#
+# Exit codes:
+#   0  the release is the one the build host named, and every file matches
+#   2  the arguments are not usable, or the keyring cannot be read
+#   3  the MANIFEST is not the one the build host named
+#   4  no good signature by the staging key
+#   5  the MANIFEST is not a staged MANIFEST, or a file does not match it
+#   6  the directory holds a file that the MANIFEST does not list
+#
+# The last line of a pass is the "appliances" line of the MANIFEST, for
+# the job to read.
+#
+# The signature is judged by gpgv's status lines, never by its exit
+# status: gpgv exits 0 for a revoked or expired key and still prints
+# VALIDSIG, and withholds only GOODSIG (docs/traps.md of Keel-Linux/apt).
+set -uo pipefail
+
+PROG=${0##*/}
+SIG=MANIFEST.staging.asc
+
+say() {
+    echo "$PROG: $*"
+}
+
+die() {
+    local code=$1
+    shift
+    say "$*" >&2
+    exit "$code"
+}
+
+[ $# -eq 3 ] || die 2 "usage: $PROG DIR MANIFEST_SHA256 KEYRING"
+dir=$1
+want=$2
+keyring=$3
+[[ $want =~ ^[0-9a-f]{64}$ ]] || die 2 "'$want' is not a sha256"
+[ -f "$dir/MANIFEST" ] || die 2 "$dir/MANIFEST does not exist"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+have=$(sha256sum "$dir/MANIFEST" | cut -d ' ' -f 1)
+[ "$have" = "$want" ] || die 3 "$dir/MANIFEST has sha256 $have, which is not the MANIFEST the build host named ($want)"
+
+# gpgv reads a binary keyring only, so an armored key is converted first.
+if ! gpg --batch --quiet --dearmor < "$keyring" > "$work/staging.gpg" 2> /dev/null \
+    || ! gpg --batch --with-colons --show-keys "$work/staging.gpg" 2> /dev/null | grep -q '^pub'; then
+    die 2 "cannot read the keyring $keyring"
+fi
+
+status=$(gpgv --status-fd 1 --keyring "$work/staging.gpg" "$dir/$SIG" "$dir/MANIFEST" 2> /dev/null)
+if ! grep -q '^\[GNUPG:\] GOODSIG ' <<< "$status" \
+    || grep -qE '^\[GNUPG:\] (BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG) ' <<< "$status"; then
+    die 4 "$dir/$SIG: no good signature by the staging key"
+fi
+say "good staging signature on $dir/MANIFEST"
+
+grep -qx 'channel staging' "$dir/MANIFEST" || die 5 "$dir/MANIFEST does not say channel staging"
+
+# The listing: every line after "# size sha256 path".
+sed -n '/^# size sha256 path$/,$p' "$dir/MANIFEST" | sed 1d > "$work/listing"
+[ -s "$work/listing" ] || die 5 "$dir/MANIFEST lists no file"
+mapfile -t entries < "$work/listing"
+count=0
+for entry in "${entries[@]}"; do
+    read -r size sum path extra <<< "$entry"
+    [[ $size =~ ^[0-9]+$ && $sum =~ ^[0-9a-f]{64}$ && -n $path && -z $extra ]] \
+        || die 5 "'$size $sum $path' is not a size, a sha256 and a path"
+    [[ $path =~ ^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$ && ! $path =~ (^|/)\.\.?(/|$) ]] \
+        || die 5 "$path is not a path this accepts"
+    [ -f "$dir/$path" ] || die 5 "$path is listed and missing"
+    if [ "$(stat -c %s "$dir/$path")" != "$size" ] \
+        || [ "$(sha256sum "$dir/$path" | cut -d ' ' -f 1)" != "$sum" ]; then
+        die 5 "$path does not match the MANIFEST"
+    fi
+    echo "$path" >> "$work/listed"
+    count=$((count + 1))
+done
+
+# Nothing more than what is listed: a file the signature does not cover
+# is not booted, and is not silently ignored either.
+while read -r path; do
+    grep -qxF "$path" "$work/listed" || die 6 "$path is not in the MANIFEST"
+done < <(cd "$dir" && find . -type f ! -name MANIFEST ! -name "$SIG" | sed 's|^\./||' | sort)
+
+say "$count files match the MANIFEST"
+grep -m 1 '^appliances ' "$dir/MANIFEST"
