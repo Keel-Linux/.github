@@ -27,6 +27,13 @@ on:
         required: false
         type: string
         default: ""
+      workers:
+        description: >-
+          number of pytest-xdist workers; empty runs one process, as before.
+          Coverage is measured in every worker with pytest-cov.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -40,6 +47,7 @@ jobs:
       PACKAGE: ${{ inputs.package }}
       TESTS: ${{ inputs.tests }}
       APT_PACKAGES: ${{ inputs.apt-packages }}
+      WORKERS: ${{ inputs.workers }}
     steps:
       - uses: actions/checkout@v7
       - name: Python in a virtual environment (the system python3 of the runner host)
@@ -53,12 +61,20 @@ jobs:
             keel-need-packages $APT_PACKAGES
           fi
           python -m pip install --quiet pytest coverage pyyaml
+          if [ -n "$WORKERS" ]; then
+            python -m pip install --quiet pytest-xdist pytest-cov
+          fi
           if [ -f pyproject.toml ]; then
             python -m pip install --quiet -e . || echo "::warning::pip install -e . failed, running from the checkout with PYTHONPATH=."
           fi
       - name: Run tests under coverage
         run: |
-          PYTHONPATH=. python -m coverage run --branch --source="$PACKAGE" -m pytest -q "$TESTS"
+          if [ -n "$WORKERS" ]; then
+            PYTHONPATH=. python -m pytest -q -n "$WORKERS" --cov="$PACKAGE" \
+              --cov-branch --cov-report= "$TESTS"
+          else
+            PYTHONPATH=. python -m coverage run --branch --source="$PACKAGE" -m pytest -q "$TESTS"
+          fi
       - name: Enforce threshold
         run: |
           set -o pipefail
