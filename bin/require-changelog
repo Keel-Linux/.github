@@ -91,6 +91,9 @@ main() {
     git cat-file -e "$head^{commit}" 2>/dev/null || die 3 "head commit $head is not here"
 
     if [[ ! -f "$changelog" ]]; then
+        if [[ -f debian/control && -f debian/rules ]]; then
+            die 3 "$changelog does not exist, but debian/control and debian/rules are present: this package source must have a changelog"
+        fi
         echo "require-changelog: $changelog does not exist, nothing to require"
         return 0
     fi

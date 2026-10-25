@@ -95,7 +95,7 @@ script() {
     [[ "$output" == *"not greater"* ]]
 }
 
-@test "a repository without a changelog requires nothing" {
+@test "a repository without a changelog or packaging requires nothing" {
     git rm -q debian/changelog
     printf 'changed\n' > thing.py
     commit "no changelog at all"
@@ -104,6 +104,21 @@ script() {
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"does not exist"* ]]
+}
+
+@test "deleting the changelog of a package source is refused" {
+    printf 'Source: thing\n' > debian/control
+    printf '#!/usr/bin/make -f\n' > debian/rules
+    commit "add packaging"
+    base_pkg="$HEAD_SHA"
+    git rm -q debian/changelog
+    printf 'changed\n' > thing.py
+    commit "delete changelog"
+
+    script "$base_pkg" "$HEAD_SHA"
+
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"must have a changelog"* ]]
 }
 
 @test "a changelog added by the pull request passes" {
