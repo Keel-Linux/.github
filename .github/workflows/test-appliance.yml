@@ -178,14 +178,16 @@ jobs:
   # where it is a required check; the way to test a fork's change is to push
   # it to a branch of the repository itself.
   fork-not-booted:
-    # github.event.repository.full_name instead of github.repository:
-    # Forgejo does not propagate github.repository into a reusable
-    # workflow the way GitHub does, so the bare context variable may
-    # refer to the called workflow's repository and not the caller's.
-    # The event payload always carries the triggering repository.
+    # Forgejo does not propagate github.event.pull_request into a
+    # reusable workflow: the nested object is empty, so
+    # .head.repo.full_name evaluates to ''.  The != '' guard prevents
+    # this job from firing when the data is missing (safe default: a
+    # same-org non-fork PR).  On GitHub the payload is always present
+    # and the guard is a no-op.
     if: >-
       github.event_name == 'pull_request_target' ||
       (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name != '' &&
        github.event.pull_request.head.repo.full_name != github.event.repository.full_name)
     runs-on: keel-host
     timeout-minutes: 5
@@ -200,11 +202,12 @@ jobs:
     # keellinux.org; the approval policy for outside contributors is the
     # first gate and this is the second. pull_request_target runs with the
     # base repository's rights and is refused outright.
-    # Same fix as fork-not-booted: use the event payload's repository
-    # instead of github.repository for Forgejo reusable workflow compat.
+    # Mirror of fork-not-booted: allow the job when the PR payload is
+    # missing (Forgejo reusable workflow) or when the head repo matches.
     if: >-
       github.event_name != 'pull_request_target' &&
       (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == '' ||
        github.event.pull_request.head.repo.full_name == github.event.repository.full_name)
     runs-on: [self-hosted, keel-lxc]
     timeout-minutes: ${{ inputs.timeout }}
