@@ -1,0 +1,86 @@
+# The commissioning contract of keel-wordpress (decision 0075), kept here as
+# the reference contract the tests read.
+contract: 1
+appliance: wordpress
+secrets: [root, db, app]
+questions:
+  - id: root_password
+    hook: 30rootpass
+    prompt: Root Password
+    answer: secret:root
+  - id: db_password
+    hook: 35mysqlpass
+    prompt: MariaDB password
+    answer: secret:db
+  - id: wordpress_db_password
+    hook: 40wordpress
+    prompt: WordPress database password
+    answer: secret:db
+  - id: wordpress_password
+    hook: 40wordpress
+    prompt: WordPress password
+    answer: secret:app
+  - id: alert_email
+    hook: 85secalerts
+    prompt: System Notifications
+    answer: admin@example.org
+# keel/instance.example.yaml of keel-wordpress, with the secrets of the run
+# and no instance name: the machine keeps the name pct create gave it
+instance:
+  version: 1
+  network:
+    managed_by: host
+    interfaces:
+      eth0:
+        ipv6:
+          method: auto
+  tls:
+    acme:
+      enabled: false
+  appliance:
+    name: wordpress
+  installation:
+    mode: simple
+  overlays:
+    installer: enabled
+    wireguard: disabled
+    etcd: disabled
+    crowdsec: disabled
+    vip: disabled
+    nginx: enabled
+    coraza: disabled
+    anubis: disabled
+    # keel 0.23.82 refuses a spec that leaves out an overlay of the chain
+    syncthing: disabled
+  secrets:
+    root_password: secret:root
+    db_password: secret:db
+    app_password: secret:app
+  app:
+    email: admin@example.org
+    options:
+      admin_user: admin
+      site_title: WordPress
+      db_user: wordpress
+      db_name: wordpress
+      db_prefix: wp_
+  hub:
+    api_key: skip
+  security:
+    alerts: admin@example.org
+    updates_at_first_boot: skip
+  first_login_wizard: false
+proofs:
+  - {secret: root, kind: shadow, user: root}
+  - {secret: db, kind: mysql, user: wordpress, host: 127.0.0.1}
+  - secret: app
+    kind: command
+    run: wp --allow-root --path=/var/www/wordpress user check-password admin "$SECRET"
+services: [nginx, mariadb, php8.4-fpm, webmin, cron, postfix]
+urls:
+  - {url: 'https://127.0.0.1/', status: 200}
+  - {url: 'https://127.0.0.1/wp-login.php', status: 200}
+  - {url: 'https://127.0.0.1:12321/', status: 200}
+forbidden:
+  - {kind: mysql-database, name: keel_check}
+  - {kind: hook, name: 40lnmp-check}

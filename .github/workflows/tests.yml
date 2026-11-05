@@ -19,3 +19,5 @@ jobs:
     uses: ./.github/workflows/github-test-shell.yml
     with:
       threshold: 100
+      # lib/commission/contract.py reads the contract with PyYAML
+      apt-packages: python3-yaml
