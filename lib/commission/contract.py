@@ -1,10 +1,17 @@
 #!/usr/bin/python3 -I
 """Read and check the commissioning contract of an appliance (decision 0075).
 
-usage: contract.py tsv FILE        print the contract as tab separated lines
-       contract.py instance FILE   print the instance description, with every
-                                   "secret:NAME" value replaced by the
-                                   environment variable KC_SECRET_NAME
+usage: contract.py tsv FILE           print the contract as tab separated lines
+       contract.py instance FILE DIR  write the instance description and its
+                                      secret files under DIR, as the machine
+                                      has them: DIR/etc/keel/instance.yaml and
+                                      DIR/etc/keel/secrets/KEY
+
+The instance names a secret as "secret:NAME", and NAME's value is the
+environment variable KC_SECRET_NAME. Under secrets, which the first boot
+reads from files only (backend file of libinithooks/declarative.py), KEY:
+secret:NAME becomes KEY: {file: /etc/keel/secrets/KEY}, and that file holds
+the value, mode 0600. Anywhere else the value is written in place.
 
 Exit 0 on success, 2 when the contract is not valid (the reasons go to
 stderr, one per line), 3 when a secret of the instance is not in the
@@ -215,36 +222,65 @@ def render(value, missing):
     if isinstance(value, list):
         return [render(v, missing) for v in value]
     if isinstance(value, str) and value.startswith("secret:"):
-        name = "KC_SECRET_" + value[7:]
-        if name not in os.environ:
-            missing.append(value[7:])
-            return value
-        return os.environ[name]
+        found = secret_value(value, missing)
+        return value if found is None else found
     return value
 
 
-def instance(path):
+SECRETS_DIR = "/etc/keel/secrets"
+
+
+def secret_value(value, missing):
+    """The value of "secret:NAME", or None after NAME went to MISSING"""
+    name = "KC_SECRET_" + value[7:]
+    if name not in os.environ:
+        missing.append(value[7:])
+        return None
+    return os.environ[name]
+
+
+def instance(path, root):
     doc = load(path)
     if not isinstance(doc.get("instance"), dict):
         fail(["instance is missing: the preseeded pass needs one"])
     missing = []
     out = render(doc["instance"], missing)
+    files = {}
+    declared = doc["instance"].get("secrets")
+    if isinstance(declared, dict):
+        for key, value in declared.items():
+            if not (isinstance(value, str) and value.startswith("secret:")):
+                continue
+            if not NAME.match(str(key)):
+                fail(["instance secrets.%s: not a lower case name" % (key,)])
+            files[key] = secret_value(value, missing)
+            out["secrets"][key] = {"file": "%s/%s" % (SECRETS_DIR, key)}
     if missing:
         print("contract: no value for secret " + ", ".join(missing),
               file=sys.stderr)
         sys.exit(3)
-    sys.stdout.write(yaml.safe_dump(out, default_flow_style=False,
-                                    sort_keys=False))
+    keel = os.path.join(root, "etc", "keel")
+    os.makedirs(os.path.join(keel, "secrets"), mode=0o700, exist_ok=True)
+    for key, value in files.items():
+        write(os.path.join(keel, "secrets", key), value)
+    write(os.path.join(keel, "instance.yaml"),
+          yaml.safe_dump(out, default_flow_style=False, sort_keys=False))
+
+
+def write(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
 
 
 def main(argv):
-    if len(argv) != 3 or argv[1] not in ("tsv", "instance"):
+    if argv[1:2] == ["tsv"] and len(argv) == 3:
+        tsv(argv[2])
+    elif argv[1:2] == ["instance"] and len(argv) == 4:
+        instance(argv[2], argv[3])
+    else:
         print(__doc__.split("\n\n")[1], file=sys.stderr)
         sys.exit(2)
-    if argv[1] == "tsv":
-        tsv(argv[2])
-    else:
-        instance(argv[2])
 
 
 if __name__ == "__main__":

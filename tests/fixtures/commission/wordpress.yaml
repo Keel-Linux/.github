@@ -23,17 +23,51 @@ questions:
   - id: alert_email
     hook: 85secalerts
     prompt: System Notifications
-    answer: admin@example.invalid
+    answer: admin@example.org
+# keel/instance.example.yaml of keel-wordpress, with the secrets of the run
+# and no instance name: the machine keeps the name pct create gave it
 instance:
   version: 1
+  network:
+    managed_by: host
+    interfaces:
+      eth0:
+        ipv6:
+          method: auto
+  tls:
+    acme:
+      enabled: false
+  appliance:
+    name: wordpress
+  installation:
+    mode: simple
+  overlays:
+    installer: enabled
+    wireguard: disabled
+    etcd: disabled
+    crowdsec: disabled
+    vip: disabled
+    nginx: enabled
+    coraza: disabled
+    anubis: disabled
   secrets:
     root_password: secret:root
     db_password: secret:db
     app_password: secret:app
   app:
-    email: admin@example.invalid
+    email: admin@example.org
     options:
+      admin_user: admin
+      site_title: WordPress
       db_user: wordpress
+      db_name: wordpress
+      db_prefix: wp_
+  hub:
+    api_key: skip
+  security:
+    alerts: admin@example.org
+    updates_at_first_boot: skip
+  first_login_wizard: false
 proofs:
   - {secret: root, kind: shadow, user: root}
   - {secret: db, kind: mysql, user: wordpress, host: 127.0.0.1}

@@ -86,9 +86,12 @@ check_forbid() {
 # appliance.
 check_hygiene() {
     local line
-    line=$(printf 'grep -aE "fatal \\[|Traceback" /var/log/inithooks.log | head -1\n' | guest_sh 2>/dev/null)
+    # ERR: is the line run writes for a hook that failed: a description
+    # 00declarative refused, or a hook that stopped, left a boot that
+    # carried on without them (19.0-11 on BR2, 2026-11-05)
+    line=$(printf 'grep -aE "fatal \\[|Traceback|^ERR: " /var/log/inithooks.log | head -1\n' | guest_sh 2>/dev/null)
     if [ -z "$line" ]; then
-        record pass firstboot.no-fatal "no fatal in /var/log/inithooks.log"
+        record pass firstboot.no-fatal "no fatal and no failed hook in /var/log/inithooks.log"
     else
         record fail firstboot.no-fatal "$line"
     fi

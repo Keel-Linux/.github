@@ -165,8 +165,8 @@ answering_expect() {
     cat > "$FAKES/expect" <<'EOF'
 #!/bin/bash
 cp "$1" "$TMP/console.exp"
-root=$(sed -n 's/.*KC_SEEN root_password.*send -- "\(.*\)\\r".*/\1/p' "$1")
-db=$(sed -n 's/.*KC_SEEN db_password.*send -- "\(.*\)\\r".*/\1/p' "$1")
+root=$(sed -n 's/.*KC_SEEN root_password.* 80\]\([^"]*\)\\r".*/\1/p' "$1")
+db=$(sed -n 's/.*KC_SEEN db_password.* 80\]\([^"]*\)\\r".*/\1/p' "$1")
 printf 'root:%s:20000:0:99999:7:::\n' "$(perl -e 'print crypt($ARGV[0], q{$6$saltsalt$})' "$root")" > "$STATE/shadow"
 printf '%s\n' "$db" > "$STATE/db-pass"
 cat "$STATE/screen"
@@ -251,22 +251,34 @@ EOF
     [[ "$output" == *"usage"* ]]
     small_contract
     run python3 -I "$CONTRACT_PY" instance "$TMP/c.yaml"
+    [ "$status" -eq 2 ]
+    run python3 -I "$CONTRACT_PY" instance "$TMP/c.yaml" "$TMP/r"
     [ "$status" -eq 3 ]
     [[ "$output" == *"no value for secret root, db"* ]]
-    KC_SECRET_root=r KC_SECRET_db=d run python3 -I "$CONTRACT_PY" instance "$TMP/c.yaml"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"root_password: r"* ]]
+    [ ! -e "$TMP/r/etc/keel/instance.yaml" ]
     printf 'contract: 1\nlist: [secret:root, 1]\n' > "$TMP/n.yaml"
-    run python3 -I "$CONTRACT_PY" instance "$TMP/n.yaml"
+    run python3 -I "$CONTRACT_PY" instance "$TMP/n.yaml" "$TMP/r"
     [ "$status" -eq 2 ]
     [[ "$output" == *"instance is missing"* ]]
+    printf 'instance:\n  secrets: {Root: secret:root}\n' > "$TMP/n.yaml"
+    KC_SECRET_root=r run python3 -I "$CONTRACT_PY" instance "$TMP/n.yaml" "$TMP/r"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"secrets.Root: not a lower case name"* ]]
 }
 
-@test "contract.py renders secrets inside lists" {
-    printf 'instance:\n  keys: [secret:root, 1]\n' > "$TMP/n.yaml"
-    KC_SECRET_root=r run python3 -I "$CONTRACT_PY" instance "$TMP/n.yaml"
+@test "contract.py: the secrets of the instance become files, the others stay in place" {
+    printf 'instance:\n  keys: [secret:root, 1]\n  secrets: {root_password: secret:root, other: {generate: true}}\n' > "$TMP/n.yaml"
+    KC_SECRET_root=r1 run python3 -I "$CONTRACT_PY" instance "$TMP/n.yaml" "$TMP/r"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"- r"* ]]
+    f="$TMP/r/etc/keel/instance.yaml"
+    grep -qx -- '- r1' "$f"
+    grep -q 'file: /etc/keel/secrets/root_password' "$f"
+    grep -q 'generate: true' "$f"
+    [ "$(cat "$TMP/r/etc/keel/secrets/root_password")" = r1 ]
+    [ "$(stat -c %a "$TMP/r/etc/keel/secrets/root_password")" = 600 ]
+    [ "$(stat -c %a "$f")" = 600 ]
+    [ "$(stat -c %a "$TMP/r/etc/keel/secrets")" = 700 ]
+    [ ! -e "$TMP/r/etc/keel/secrets/other" ]
 }
 
 # ---- arguments --------------------------------------------------------
@@ -364,13 +376,30 @@ EOF
     [[ "$output" == *"PASS"* ]]
     grep -qx $'result\tpass' "$OUT/lxc-interactive/meta"
     grep -q $'^sha256\t[0-9a-f]\{64\}$' "$OUT/lxc-interactive/meta"
-    root=$(sed -n 's/.*KC_SEEN root_password.*send -- "\(.*\)\\r".*/\1/p' "$TMP/console.exp")
+    root=$(sed -n 's/.*KC_SEEN root_password.* 80\]\([^"]*\)\\r".*/\1/p' "$TMP/console.exp")
     [ "${#root}" -eq 24 ]
     ! grep -rq "$root" "$OUT"
     grep -q 'stty_init "rows 40 columns 120"' "$TMP/console.exp"
-    grep -q 'pct enter 9001' "$TMP/console.exp"
-    grep -q 'exec login -f root' "$TMP/console.exp"
-    grep -q 'send -- "admin@example.invalid' "$TMP/console.exp"
+    grep -q 'pct console 9001' "$TMP/console.exp"
+    grep -q '80\]admin@example.invalid' "$TMP/console.exp"
+    # the password menu gets Manual, never the Enter that takes Generate
+    grep -q 'Choose how to set this password\*} $s\]} { send -- "M"' "$TMP/console.exp"
+    # tty1 takes the password pct create gave, which is none of the secrets
+    login=$(sed -n 's/.*-ex {Password:} { send -- "\([^"]*\)\\r".*/\1/p' "$TMP/console.exp")
+    [ "${#login}" -eq 24 ]
+    [ "$login" != "$root" ]
+    grep -q -- "--password '$login'" "$LOG"
+    ! grep -rq "$login" "$OUT"
+    [[ "$output" == *"pass  console.login"* ]]
+}
+
+@test "interactive: a console that gives no root login" {
+    small_contract
+    good_machine
+    printf 'KC_NOLOGIN\n' > "$STATE/screen"
+    run_pass lxc-interactive
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"fail  console.login                            no root login on tty1"* ]]
 }
 
 @test "interactive: a login that starts keel-init counts, a stuck console does not finish" {
@@ -397,16 +426,22 @@ EOF
 @test "preseed: the description is written root only, and a deferred question fails" {
     small_contract
     good_machine
-    printf 'INFO: [35mysqlpass] not asked, nobody can answer\n' > "$GUEST/var/log/inithooks.log"
+    printf 'INFO: [35mysqlpass] not asked, nobody can answer\nERR: [40wordpress] failed - exit code 1\n' > "$GUEST/var/log/inithooks.log"
     printf 'root\n' > "$STATE/shadow"
     run_pass lxc-preseed --keep
     [ "$status" -eq 1 ]
+    [[ "$output" == *"fail  firstboot.no-fatal                       ERR: [40wordpress] failed"* ]]
     [[ "$output" == *"pass  instance.written"* ]]
     [[ "$output" == *"pass  preseed.answered.30rootpass"* ]]
     [[ "$output" == *"fail  preseed.answered.35mysqlpass"* ]]
     f="$GUEST/9001/rootfs/etc/keel/instance.yaml"
     [ "$(stat -c %a "$f")" = 600 ]
-    grep -q 'root_password: [A-Za-z0-9]\{24\}' "$f"
+    grep -q 'file: /etc/keel/secrets/root_password' "$f"
+    ! grep -q '[A-Za-z0-9]\{24\}' "$f"
+    s="$GUEST/9001/rootfs/etc/keel/secrets"
+    [ "$(stat -c %a "$s")" = 700 ]
+    [ "$(stat -c %a "$s/db_password")" = 600 ]
+    grep -qx '[A-Za-z0-9]\{24\}' "$s/root_password"
     [ -e "$STATE/unmounted" ]
 }
 

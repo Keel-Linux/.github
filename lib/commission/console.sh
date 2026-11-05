@@ -1,14 +1,16 @@
 # shellcheck shell=bash
 # The single quoted strings are expect and guest scripts: they expand there.
 # shellcheck disable=SC2016
-# The operator at the console: keel-commission logs in as root the way an
-# operator does after `pct create` (a full login, with the profile, on a
-# terminal of 40 rows and 120 columns, like the Proxmox console) and
-# answers keel-init with the answers of the contract.
+# The operator at the console: keel-commission logs in as root on the
+# console of the container, tty1, which is the console of the Proxmox web
+# interface (pct console), with the password pct create gave, on a
+# terminal of 40 rows and 120 columns, and answers keel-init with the
+# answers of the contract.
 #
 # The run is an expect script that runs on the PVE host. It prints marker
 # lines that console_parse reads back:
 #
+#   KC_NOLOGIN     the console gave no login prompt, or refused the password
 #   KC_CONFCONSOLE the login opened confconsole before keel-init ran
 #   KC_HINT        the login said to run keel-init, before anything ran it
 #   KC_SEEN ID     the question ID was on the screen and was answered
@@ -36,13 +38,20 @@ console_script() {
     # (confconsole), and keys typed then go to that program. -notransfer
     # leaves that output to the patterns, so no question is lost.
     printf 'proc quiet {} { expect -timeout 2 -notransfer -re {.+} { return 0 } timeout { return 1 } eof { return 1 } }\n'
-    # pct enter gives a root shell; exec login replaces it by a full login,
-    # which runs the profile as the Proxmox console does. The first prompt
-    # is the one of pct enter, and is not the end of anything.
-    printf 'spawn -noecho env TERM=xterm pct enter %s\n' "$KC_VMID"
-    printf 'expect -re {#\\s*(\\x1b\\[[0-9;]*m)*\\s*$}\nsleep 1\n'
-    printf 'send -- "exec login -f root\\r"\n'
+    # settle: the rest of the screen, read until it stays still for a
+    # second. A title is drawn before the text of its box, so a question is
+    # told from the menu of the same title only once the box is all there.
+    printf 'proc settle {} { set s ""; expect -timeout 1 -re {.+} { append s $expect_out(buffer); exp_continue } timeout {} eof {}; return $s }\n'
+    # pct console is tty1 of the container. Enter shows the login prompt
+    # again; the password is the one pct create gave, which is not a
+    # secret of the contract, so a proof cannot pass on it.
+    printf 'spawn -noecho env TERM=xterm pct console %s\n' "$KC_VMID"
+    printf 'sleep 1\nsend -- "\\r"\n'
+    printf 'expect -timeout 30 -re {login: *$} { send -- "root\\r" } timeout { puts "\\nKC_NOLOGIN"; exit 0 }\n'
+    printf 'expect -timeout 30 -ex {Password:} { send -- "%s\\r" } timeout { puts "\\nKC_NOLOGIN"; exit 0 }\n' \
+        "$KC_LOGIN_SECRET"
     printf 'expect {\n'
+    printf '    -ex {Login incorrect} { puts "\\nKC_NOLOGIN"; exit 0 }\n'
     # confconsole is no question: a login that opens it and not keel-init
     # is recorded, and it is left as an operator leaves it, by its Advanced
     # Menu and Quit. Escape only moves between its menus, and killing it
@@ -57,13 +66,20 @@ console_script() {
     printf '    -ex {Configuration Console} { step; if {!$launched} { puts "\\nKC_CONFCONSOLE" }\n'
     printf '        expect -timeout 2 -ex {really want to} { sleep 0.5; send -- "y" } -re {Quit the configuration console} { send -- "Q"; sleep 0.5; send -- "\\r" } -re {<Advanced Menu>} { send -- "\\r" } timeout { send -- "\\033" }\n'
     printf '        exp_continue }\n'
-    fmt='    -ex {%s} { step; puts "\\nKC_SEEN %s"; set launched 1; send -- "%s\\r"; exp_continue }\n'
+    # A password of keel-init comes first as a menu of the same title,
+    # Generate or Manual (get_password of libinithooks). Enter there takes
+    # Generate, and the machine gets a password nobody typed (BR2,
+    # 2026-11-05): the menu gets M and Enter, Manual. Then the password box
+    # and its confirmation get the answer. Each answer is typed into an
+    # emptied field: an input box can come with a value in it.
+    fmt='    -ex {%s} { step; set launched 1; set s "$expect_out(buffer)[settle]"; if {[string match {*Choose how to set this password*} $s]} { send -- "M"; sleep 0.3; send -- "\\r" } else { puts "\\nKC_SEEN %s"; send -- "[string repeat "\\x7f" 80]%s\\r" }; exp_continue }\n'
     awk -F'\t' -v fmt="$fmt" '{ printf fmt, $2, $1, $3 }' "$1"
     printf '    -ex {keel-init} { if {!$launched} { puts "\\nKC_HINT" }; exp_continue }\n'
     printf '    -re {#\\s*(\\x1b\\[[0-9;]*m)*\\s*$} {\n'
     printf '        if {![quiet]} { step; exp_continue }\n'
     printf '        if {!$launched} { set launched 1; puts "\\nKC_LAUNCH"; send -- "keel-init\\r"; exp_continue }\n'
-    printf '        puts "\\nKC_DONE"; send -- "exit\\r"; sleep 1; send -- "exit\\r"; expect eof\n'
+    # exit logs out to the login prompt of tty1; Ctrl-a q leaves pct console
+    printf '        puts "\\nKC_DONE"; send -- "exit\\r"; sleep 1; send -- "\\001q"; expect eof\n'
     printf '    }\n'
     printf '    timeout { step; send -- "\\r"; exp_continue }\n'
     printf '    eof { puts "\\nKC_EOF" }\n'
@@ -82,6 +98,11 @@ console_parse() {
     local raw="$1" transcript="${1%.log}.txt" id prompt first_seen launch qlines line
     # the screen as text: the escape sequences out, one marker per line
     sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' -e 's/\x1b[()][0-9A-B]//g' "$raw" | LC_ALL=C tr -cd '[:print:]\n' > "$transcript"
+    if grep -q '^KC_NOLOGIN' "$transcript"; then
+        record fail console.login "no root login on tty1 with the password pct create gave"
+    else
+        record pass console.login "root logged in on tty1"
+    fi
     first_seen=$(grep -n '^KC_SEEN ' "$transcript" | head -1 | cut -d: -f1)
     launch=$(grep -n '^KC_LAUNCH' "$transcript" | head -1 | cut -d: -f1)
     if grep -q '^KC_HINT' "$transcript"; then

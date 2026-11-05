@@ -153,10 +153,11 @@ pass_interactive() {
 }
 
 pass_preseed() {
-    local instance="$KC_WORK/instance.yaml" hook
-    (umask 077; python3 -I "$KC_LIB/contract.py" instance "$KC_CONTRACT" > "$instance") || exit 2
+    local root="$KC_WORK/root" hook rc=0
+    (umask 077; python3 -I "$KC_LIB/contract.py" instance "$KC_CONTRACT" "$root") || rc=$?
+    [ "$rc" = 0 ] || exit "$rc"
     ct_create "$KC_TEMPLATE" >/dev/null || die 3 "pct create failed"
-    if ct_write_instance "$instance"; then
+    if ct_write_instance "$root"; then
         record pass instance.written /etc/keel/instance.yaml
     else
         record fail instance.written "could not write /etc/keel/instance.yaml"
@@ -210,6 +211,7 @@ main() {
         KC_SECRETS[$name]=$(new_secret)
         export "KC_SECRET_$name=${KC_SECRETS[$name]}"
     done
+    KC_LOGIN_SECRET=$(new_secret)
     KC_DIR="$KC_OUT/$KC_PASS"
     KC_RECORD="$KC_DIR/record.tsv"
     KC_WORK=$(mktemp -d)

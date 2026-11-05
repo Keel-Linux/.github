@@ -24,10 +24,13 @@ template_sha() {
 }
 
 # ct_create VOLID: make the machine as an operator makes it: an unprivileged
-# container from the template, nesting on, nothing preseeded. KC_CT_OPTS
-# adds the site's storage and network options.
+# container from the template, nesting on, nothing preseeded, and the root
+# password the Proxmox web interface asks for, KC_LOGIN_SECRET. That one is
+# no secret of the contract: the first boot must replace it with the root
+# secret, and the root proof checks the root secret. KC_CT_OPTS adds the
+# site's storage and network options.
 ct_create() {
-    pve "pct create $KC_VMID '$1' --hostname kc$KC_VMID --unprivileged 1 --features nesting=1 $KC_CT_OPTS"
+    pve "pct create $KC_VMID '$1' --hostname kc$KC_VMID --unprivileged 1 --features nesting=1 --password '$KC_LOGIN_SECRET' $KC_CT_OPTS"
 }
 
 ct_start() {
@@ -41,15 +44,18 @@ ct_destroy() {
     pve "pct stop $KC_VMID >/dev/null 2>&1; pct destroy $KC_VMID --purge 1 >/dev/null 2>&1; true"
 }
 
-# ct_write_instance FILE: put the instance description at
-# /etc/keel/instance.yaml of the stopped machine, owned by its root and
-# readable by root only, before its first boot.
+# ct_write_instance DIR: put DIR/etc/keel/instance.yaml and the secret
+# files of DIR/etc/keel/secrets into the stopped machine before its first
+# boot, owned by its root and readable by root only, as instance.example.yaml
+# of an appliance says to. /etc/keel of the image keeps its own owner and
+# mode (--no-overwrite-dir).
 #
 # The path pct mount names must end in /VMID/rootfs, or nothing is
 # written: on 2026-11-05 a path that did not parse came out empty, and the
 # description went to /etc/keel of the PVE host itself.
 ct_write_instance() {
-    pve "set -e; d=\$(pct mount $KC_VMID | sed -n \"s/^[^']*'\\([^']*\\)'.*/\\1/p\"); case \"\$d\" in /*/$KC_VMID/rootfs) ;; *) pct unmount $KC_VMID; echo \"pct mount named '\$d', not a rootfs of $KC_VMID\" >&2; exit 1 ;; esac; test -d \"\$d/etc\"; mkdir -p \"\$d/etc/keel\"; cat > \"\$d/etc/keel/instance.yaml\"; chown \"\$(stat -c %u:%g \"\$d/etc\")\" \"\$d/etc/keel\" \"\$d/etc/keel/instance.yaml\"; chmod 0600 \"\$d/etc/keel/instance.yaml\"; pct unmount $KC_VMID" < "$1"
+    tar -C "$1" -cf - etc/keel/instance.yaml etc/keel/secrets \
+        | pve "set -e; d=\$(pct mount $KC_VMID | sed -n \"s/^[^']*'\\([^']*\\)'.*/\\1/p\"); case \"\$d\" in /*/$KC_VMID/rootfs) ;; *) pct unmount $KC_VMID; echo \"pct mount named '\$d', not a rootfs of $KC_VMID\" >&2; exit 1 ;; esac; test -d \"\$d/etc\"; o=\$(stat -c %u:%g \"\$d/etc\"); [ -d \"\$d/etc/keel\" ] || { mkdir \"\$d/etc/keel\"; chown \"\$o\" \"\$d/etc/keel\"; }; tar -x -C \"\$d\" --no-same-owner --no-overwrite-dir -f -; chown -R \"\$o\" \"\$d/etc/keel/instance.yaml\" \"\$d/etc/keel/secrets\"; chmod 0600 \"\$d/etc/keel/instance.yaml\"; chmod 0700 \"\$d/etc/keel/secrets\"; pct unmount $KC_VMID"
 }
 
 # ct_wait_firstboot: wait until the first boot has run to its end, which
