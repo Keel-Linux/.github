@@ -6,6 +6,10 @@ usage: contract.py tsv FILE           print the contract as tab separated lines
                                       secret files under DIR, as the machine
                                       has them: DIR/etc/keel/instance.yaml and
                                       DIR/etc/keel/secrets/KEY
+       contract.py keys qm|tcl        the KEYS on stdin as `sendkey` lines of
+                                      qm monitor, or as a Tcl string body
+       contract.py mask               the KEYS on stdin as the guide shows them
+       contract.py capture REGEX      the matches of REGEX in the screen on stdin
 
 The instance names a secret as "secret:NAME", and NAME's value is the
 environment variable KC_SECRET_NAME. Under secrets, which the first boot
@@ -21,13 +25,17 @@ The lines of `tsv`, one record per line, fields separated by a tab:
 
     appliance  NAME
     secret     NAME
-    question   ID  HOOK  PROMPT  ANSWER
+    question   ID  HOOK  PROMPT  ANSWER  TYPE
     proof      SECRET  KIND  ARG1  ARG2  ARG3
     service    NAME
     url        URL  STATUS
     forbid     KIND  NAME
 
-bin/keel-commission reads them; it never parses YAML itself.
+and the lines of screens.py: vm, installer, shot, node, answer, capture and
+cross. bin/keel-commission reads them; it never parses YAML itself.
+
+`keys` takes the values of {secret:NAME} from KC_SECRET_NAME, of {invite:N}
+from KC_INVITE_N and of {vip} from KC_VIP, and exits 3 when one is not set.
 """
 
 import os
@@ -35,6 +43,11 @@ import re
 import sys
 
 import yaml
+
+# -I leaves the directory of this script out of the path: screens.py is
+# found by its own path, next to this file
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import screens  # noqa: E402
 
 NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 APPLIANCE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -123,10 +136,20 @@ def check_questions(doc, secrets, errors):
                           "characters other than letters, digits and "
                           "._:()/'- " % (qid, prompt))
         answer = item.get("answer")
-        check_answer(qid, answer, secrets, errors)
+        # input: the answer is typed into an emptied field, then Enter;
+        # choice: the answer is keys (screens.py), a menu or a yes/no box
+        kind = item.get("type", "input")
+        if kind == "choice":
+            bad = screens.keys_valid(answer, [], set())
+            if bad:
+                errors.append("question %s: %s" % (qid, bad))
+        elif kind == "input":
+            check_answer(qid, answer, secrets, errors)
+        else:
+            errors.append("question %s: type %r is not input or choice" % (qid, kind))
         if isinstance(answer, str) and answer.startswith("secret:"):
             asked.add(answer[7:])
-        rows.append(["question", qid, hook, prompt, str(answer)])
+        rows.append(["question", qid, hook, prompt, str(answer), str(kind)])
     if not rows:
         errors.append("questions is empty: an appliance asks at least the "
                       "root password")
@@ -208,6 +231,7 @@ def tsv(path):
     rows += check_questions(doc, secrets, errors)
     rows += check_proofs(doc, secrets, errors)
     rows += check_checks(doc, errors)
+    rows += screens.rows(doc, secrets, errors)
     if "instance" in doc and not isinstance(doc["instance"], dict):
         errors.append("instance is not a mapping")
     if errors:
@@ -273,9 +297,42 @@ def write(path, text):
         f.write(text)
 
 
+def values():
+    """What {secret:NAME}, {invite:N} and {vip} stand for, from the environment"""
+    found = {}
+    for key, value in os.environ.items():
+        if key.startswith("KC_SECRET_"):
+            found["secret:" + key[10:]] = value
+        elif key.startswith("KC_INVITE_"):
+            found["invite:" + key[10:]] = value
+    if "KC_VIP" in os.environ:
+        found["vip"] = os.environ["KC_VIP"]
+    return found
+
+
+def keys(how):
+    text = sys.stdin.read().rstrip("\n")
+    try:
+        tokens = screens.resolve(text, values())
+        sys.stdout.write(screens.as_qm(tokens) if how == "qm" else screens.as_tcl(tokens))
+    except KeyError as error:
+        print("contract: no value for %s" % error.args[0], file=sys.stderr)
+        sys.exit(3)
+    except ValueError as error:
+        print("contract: %s" % error, file=sys.stderr)
+        sys.exit(2)
+
+
 def main(argv):
     if argv[1:2] == ["tsv"] and len(argv) == 3:
         tsv(argv[2])
+    elif argv[1:2] == ["keys"] and argv[2:] in (["qm"], ["tcl"]):
+        keys(argv[2])
+    elif argv[1:] == ["mask"]:
+        print(screens.as_mask(sys.stdin.read().rstrip("\n")))
+    elif argv[1:2] == ["capture"] and len(argv) == 3:
+        for found in screens.capture(argv[2], sys.stdin.read()):
+            print(found)
     elif argv[1:2] == ["instance"] and len(argv) == 4:
         instance(argv[2], argv[3])
     else:

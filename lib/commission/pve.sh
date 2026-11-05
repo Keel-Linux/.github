@@ -15,6 +15,10 @@ pve() {
 # guest_sh: run the script on stdin inside the machine, as root. A secret
 # that a check needs goes in the script, so it never is on a command line.
 guest_sh() {
+    if [ "${KC_KIND:-lxc}" = vm ]; then
+        vm_guest_sh
+        return
+    fi
     # --norc: bash sources ~/.bashrc when it sees SSH_CLIENT, which pct exec
     # passes on from the ssh session, and the .bashrc of root starts
     # confconsole once (BR2, 2026-11-05): a check must not spend that.

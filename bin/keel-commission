@@ -1,44 +1,60 @@
 #!/bin/bash
-# The commissioning test of decision 0075: make a machine from a template
-# as an operator does, on a Proxmox host, and check that its first boot,
-# its questions and its passwords work.
+# The commissioning test of decisions 0075 and 0076: make a machine from a
+# template or an ISO as an operator does, on a Proxmox host, and check that
+# its first boot, its questions and its passwords work; for a cloud mode,
+# make every node of it on its own site and check them together.
 #
 # usage: keel-commission --check CONTRACT
-#        keel-commission --contract CONTRACT --template VOLID --vmid N
-#                        --pass lxc-interactive|lxc-preseed --site NAME
-#                        --out DIR [--keep]
+#        keel-commission --contract CONTRACT --vmid N --pass PASS --site NAME
+#                        --out DIR [--template VOLID] [--iso VOLID] [--keep]
 #
 #   --check      only read the contract (tests/commission.yaml of the
 #                appliance) and say whether it is valid
 #   --template   the template volume on the PVE host, for example
 #                local:vztmpl/debian-13-keel-wordpress_19.0-12_amd64.tar.zst
-#   --vmid       a free container id; one that exists is never touched
+#   --iso        the ISO volume on the PVE host, for example
+#                local:iso/keel-mariadb-19.0-trixie-amd64.iso
+#   --vmid       a free container or VM id; one that exists is never
+#                touched. The nodes of a cloud mode take N, N+1, N+2.
 #   --pass       lxc-interactive: nothing preseeded, a root login answers
-#                keel-init with the contract's answers;
+#                keel-init with the contract's answers (--template);
 #                lxc-preseed: the contract's instance description is put in
 #                the machine before its first boot, and no question may be
-#                left for keel-init
+#                left for keel-init (--template);
+#                vm-iso: a VM boots the ISO, the installer and the first
+#                boot of the disk are answered on its screen (--iso);
+#                cloud_simple, cloud_advanced: every node of that mode in
+#                the contract's nodes, then the checks across them (a node
+#                without an image of its own takes --template or --iso)
 #   --site       the site name written in the record (br1, br2)
-#   --out        where the record goes: DIR/PASS/record.tsv, meta, and
-#                the console transcript
-#   --keep       leave the machine after the run, to look at it
+#   --out        where the record goes: DIR/PASS/record.tsv, meta, the
+#                console transcript, the screens, and DIR/guide.md
+#   --keep       leave the machines after the run, to look at them
 #
 # Environment:
 #   KC_PVE              the command that reaches the PVE host (required for
-#                       a pass), e.g. "ssh -o BatchMode=yes root@pve1"
+#                       a pass), e.g. "ssh -o BatchMode=yes root@pve1";
+#                       KC_PVE_<SITE> for a node on that site (KC_PVE_BR2)
 #   KC_CT_OPTS          more pct create options: storage, network, memory
+#   KC_VM_OPTS          more qm create options: the network, for example
+#                       "--net0 virtio,bridge=vmbr0,tag=88"
+#   KC_VM_STORAGE       the storage of the VM's disk (local-lvm)
+#   KC_VM_FIRMWARE      auto (by the ISO), seabios or ovmf
+#                       (each of the four with _<SITE> for a node's site)
 #   KC_BOOT_TIMEOUT     seconds to wait for the first boot (900)
 #   KC_MAIL_WAIT        seconds to wait before the mail check (600)
 #   KC_CONSOLE_TIMEOUT  seconds of no change before Enter (6)
 #   KC_CONSOLE_STEPS    Enters before the console is stuck (90)
+#   KC_TUNNEL           the command that opens the SOCKS tunnel of the web
+#                       screenshots with -N -D PORT (KC_PVE)
 #
 # Exit: 0 every check passed, 1 a check failed, 2 usage or an invalid
 # contract, 3 the PVE host did not make or start the machine, 4 the vmid
 # is in use.
 #
 # The secrets are made fresh for each run, are never the defaults and are
-# never written to the record: the record says which login worked, not
-# with what.
+# never written to the record, the screens or the guide: they say which
+# login worked, not with what.
 set -uo pipefail
 
 KC_LIB="$(cd "$(dirname "$0")/../lib/commission" && pwd)"
@@ -48,6 +64,12 @@ KC_LIB="$(cd "$(dirname "$0")/../lib/commission" && pwd)"
 . "$KC_LIB/console.sh"
 # shellcheck source=lib/commission/checks.sh
 . "$KC_LIB/checks.sh"
+# shellcheck source=lib/commission/vm.sh
+. "$KC_LIB/vm.sh"
+# shellcheck source=lib/commission/web.sh
+. "$KC_LIB/web.sh"
+# shellcheck source=lib/commission/nodes.sh
+. "$KC_LIB/nodes.sh"
 
 KC_BOOT_TIMEOUT="${KC_BOOT_TIMEOUT:-900}"
 KC_MAIL_WAIT="${KC_MAIL_WAIT:-600}"
@@ -56,6 +78,7 @@ KC_CONSOLE_STEPS="${KC_CONSOLE_STEPS:-90}"
 KC_POLL="${KC_POLL:-10}"
 KC_CT_OPTS="${KC_CT_OPTS:-}"
 KC_KEEP=0
+KC_SHOT=0
 
 usage() {
     sed -n '/^# usage:/,/^#   --keep/s/^# \{0,1\}//p' "$0" >&2
@@ -88,13 +111,14 @@ resolve() {
 }
 
 parse_args() {
-    KC_CONTRACT="" KC_TEMPLATE="" KC_VMID="" KC_PASS="" KC_SITE="" KC_OUT=""
+    KC_CONTRACT="" KC_TEMPLATE="" KC_ISO="" KC_VMID="" KC_PASS="" KC_SITE="" KC_OUT=""
     KC_CHECK_ONLY=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --check) KC_CHECK_ONLY=1; KC_CONTRACT="${2:-}"; shift ;;
             --contract) KC_CONTRACT="${2:-}"; shift ;;
             --template) KC_TEMPLATE="${2:-}"; shift ;;
+            --iso) KC_ISO="${2:-}"; shift ;;
             --vmid) KC_VMID="${2:-}"; shift ;;
             --pass) KC_PASS="${2:-}"; shift ;;
             --site) KC_SITE="${2:-}"; shift ;;
@@ -106,13 +130,18 @@ parse_args() {
     done
     [ -n "$KC_CONTRACT" ] || usage
     [ "$KC_CHECK_ONLY" = 1 ] && return 0
-    if [ -z "$KC_TEMPLATE" ] || [ -z "$KC_SITE" ] || [ -z "$KC_OUT" ]; then
+    if [ -z "$KC_SITE" ] || [ -z "$KC_OUT" ]; then
         usage
     fi
     [[ "$KC_VMID" =~ ^[1-9][0-9]{2,8}$ ]] || die 2 "--vmid '$KC_VMID' is not a container id"
-    if [ "$KC_PASS" != lxc-interactive ] && [ "$KC_PASS" != lxc-preseed ]; then
-        die 2 "--pass '$KC_PASS' is not lxc-interactive or lxc-preseed"
-    fi
+    case "$KC_PASS" in
+        lxc-interactive|lxc-preseed) KC_KIND=lxc KC_IMAGE="$KC_TEMPLATE" ;;
+        vm-iso) KC_KIND=vm KC_IMAGE="$KC_ISO" ;;
+        cloud_simple|cloud_advanced) KC_KIND=nodes KC_IMAGE=- ;;
+        *) die 2 "--pass '$KC_PASS' is not lxc-interactive, lxc-preseed, vm-iso, cloud_simple or cloud_advanced" ;;
+    esac
+    [ -n "$KC_IMAGE" ] || die 2 "--pass $KC_PASS needs $([ "$KC_KIND" = vm ] && echo --iso || echo --template)"
+    site_env "$KC_SITE"
     [ -n "${KC_PVE:-}" ] || die 2 "KC_PVE is not set: nothing reaches the PVE host"
 }
 
@@ -120,53 +149,79 @@ load_contract() {
     KC_TSV=$(python3 -I "$KC_LIB/contract.py" tsv "$KC_CONTRACT") || exit 2
 }
 
-# questions_file FILE: one "ID<TAB>PROMPT<TAB>ANSWER" line per question,
-# with the answers resolved.
+# questions_file FILE: one "ID<TAB>PROMPT<TAB>ANSWER<TAB>TYPE" line per
+# question, with the answers resolved; the answer of a choice is a Tcl
+# string body of its keys.
 questions_file() {
-    local rows row f
+    local rows row f answer
     mapfile -t rows < <(grep $'^question\t' <<< "$KC_TSV")
     : > "$1"
     chmod 0600 "$1"
     for row in "${rows[@]}"; do
         IFS=$'\t' read -r -a f <<< "$row"
-        printf '%s\t%s\t%s\n' "${f[1]}" "${f[3]}" "$(resolve "${f[4]}")" >> "$1"
+        if [ "${f[5]}" = choice ]; then
+            answer=$(printf '%s' "${f[4]}" | python3 -I "$KC_LIB/contract.py" keys tcl)
+        else
+            answer=$(resolve "${f[4]}")
+        fi
+        printf '%s\t%s\t%s\t%s\n' "${f[1]}" "${f[3]}" "$answer" "${f[5]}" >> "$1"
+    done
+}
+
+# answers_file FILE: the screens of this node (Mode, Role, Join a mesh,
+# ...), one "ID<TAB>PROMPT<TAB>KEYS" line each, KEYS a Tcl string body
+# with the secrets, the invite lines and the VIP filled in.
+answers_file() {
+    local row id prompt keys rows
+    : > "$1"
+    chmod 0600 "$1"
+    mapfile -t rows < <(grep $'^answer\t'"${KC_NODE:-}"$'\t' <<< "$KC_TSV" | cut -f3-)
+    for row in "${rows[@]}"; do
+        IFS=$'\t' read -r id prompt keys <<< "$row"
+        printf '%s\t%s\t%s\n' "$id" "$prompt" \
+            "$(printf '%s' "$keys" | python3 -I "$KC_LIB/contract.py" keys tcl)" >> "$1"
     done
 }
 
 write_meta() {
     local sha contract
-    sha=$(template_sha "$KC_TEMPLATE")
+    sha=$(template_sha "$KC_IMAGE")
     contract=$(sha256sum "$KC_CONTRACT" | cut -d' ' -f1)
-    printf 'pass\t%s\nsite\t%s\ntemplate\t%s\nsha256\t%s\ncontract\t%s\ndate\t%s\n' \
-        "$KC_PASS" "$KC_SITE" "$KC_TEMPLATE" "$sha" "$contract" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$KC_DIR/meta"
+    # the release gate looks a template or an ISO up by its sha256
+    printf 'pass\t%s\nsite\t%s\n%s\t%s\nsha256\t%s\ncontract\t%s\ndate\t%s\n' \
+        "$KC_PASS" "$KC_SITE" "$([ "$KC_KIND" = vm ] && echo iso || echo template)" "$KC_IMAGE" \
+        "$sha" "$contract" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$KC_DIR/meta"
 }
 
 pass_interactive() {
-    local questions="$KC_WORK/questions" script="$KC_WORK/console.exp"
+    local questions="$KC_WORK/questions" answers="$KC_WORK/answers" script="$KC_WORK/console.exp"
     # without expect the console is never driven, and every question would
     # fail as if keel-init had not asked it (BR1, 2026-11-05)
     pve 'command -v expect' >/dev/null || die 3 "the PVE host has no expect: apt-get install expect"
-    ct_create "$KC_TEMPLATE" >/dev/null || die 3 "pct create failed"
+    ct_create "$KC_IMAGE" >/dev/null || die 3 "pct create failed"
     ct_start || die 3 "pct start failed"
-    boot_or_fail || return 0
+    boot_or_fail || return 1
     questions_file "$questions"
-    console_script "$questions" > "$script"
-    console_run "$script" "$KC_DIR/console.log"
-    console_parse "$KC_DIR/console.log" "$questions"
+    answers_file "$answers"
+    console_script "$questions" "$answers" > "$script"
+    console_run "$script" "$KC_LOG"
+    console_parse "$KC_LOG" "$questions" "$answers"
+    answers_table > "$KC_WORK/table"
+    console_frames "${KC_LOG%.log}.txt" "$KC_WORK/table"
 }
 
 pass_preseed() {
     local root="$KC_WORK/root" hook rc=0
     (umask 077; python3 -I "$KC_LIB/contract.py" instance "$KC_CONTRACT" "$root") || rc=$?
     [ "$rc" = 0 ] || exit "$rc"
-    ct_create "$KC_TEMPLATE" >/dev/null || die 3 "pct create failed"
+    ct_create "$KC_IMAGE" >/dev/null || die 3 "pct create failed"
     if ct_write_instance "$root"; then
         record pass instance.written /etc/keel/instance.yaml
     else
         record fail instance.written "could not write /etc/keel/instance.yaml"
     fi
     ct_start || die 3 "pct start failed"
-    boot_or_fail || return 0
+    boot_or_fail || return 1
     local hooks
     mapfile -t hooks < <(grep $'^question\t' <<< "$KC_TSV" | cut -f3 | sort -u)
     for hook in "${hooks[@]}"; do
@@ -197,6 +252,22 @@ common_checks() {
     check_mail
 }
 
+# pass_one: the pass of one machine, from its creation to its removal.
+pass_one() {
+    local done=0
+    case "$KC_PASS" in
+        lxc-interactive) pass_interactive && done=1 ;;
+        lxc-preseed) pass_preseed && done=1 ;;
+        vm-iso) pass_vm && done=1 ;;
+    esac
+    # a machine that never finished its first boot has nothing to check
+    if [ "$done" = 1 ] || [ "$KC_KIND" = lxc ]; then
+        common_checks
+        web_shots
+    fi
+    if [ "$KC_KIND" = vm ]; then vm_destroy; else ct_destroy; fi
+}
+
 main() {
     local name
     parse_args "$@"
@@ -205,8 +276,8 @@ main() {
         echo "keel-commission: $KC_CONTRACT is a valid contract"
         exit 0
     fi
-    if pve "pct status $KC_VMID" >/dev/null 2>&1; then
-        die 4 "container $KC_VMID exists; keel-commission only uses a free id"
+    if [ "$KC_KIND" != nodes ] && pve "qm status $KC_VMID >/dev/null 2>&1 || pct status $KC_VMID >/dev/null 2>&1"; then
+        die 4 "vmid $KC_VMID exists; keel-commission only uses a free id"
     fi
     local names
     mapfile -t names < <(grep $'^secret\t' <<< "$KC_TSV" | cut -f2)
@@ -217,18 +288,20 @@ main() {
     KC_LOGIN_SECRET=$(new_secret)
     KC_DIR="$KC_OUT/$KC_PASS"
     KC_RECORD="$KC_DIR/record.tsv"
+    KC_LOG="$KC_DIR/console.log"
     KC_WORK=$(mktemp -d)
     trap 'rm -rf "$KC_WORK"' EXIT
-    mkdir -p "$KC_DIR"
+    mkdir -p "$KC_DIR/screens"
     : > "$KC_RECORD"
-    write_meta
-    if [ "$KC_PASS" = lxc-interactive ]; then
-        pass_interactive
+    if [ "$KC_KIND" = nodes ]; then
+        printf 'pass\t%s\nsite\t%s\ncontract\t%s\ndate\t%s\n' "$KC_PASS" "$KC_SITE" \
+            "$(sha256sum "$KC_CONTRACT" | cut -d' ' -f1)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$KC_DIR/meta"
+        pass_nodes
     else
-        pass_preseed
+        write_meta
+        pass_one
     fi
-    common_checks
-    ct_destroy
+    python3 -I "$KC_LIB/guide.py" "$KC_OUT"
     if grep -q $'^fail\t' "$KC_RECORD"; then
         printf 'result\tfail\n' >> "$KC_DIR/meta"
         echo "keel-commission: FAIL, $(grep -c $'^fail\t' "$KC_RECORD") checks failed: $KC_RECORD"
