@@ -46,8 +46,12 @@ console_script() {
     # again; the password is the one pct create gave, which is not a
     # secret of the contract, so a proof cannot pass on it.
     printf 'spawn -noecho env TERM=xterm pct console %s\n' "$KC_VMID"
-    printf 'sleep 1\nsend -- "\\r"\n'
-    printf 'expect -timeout 30 -re {login: *$} { send -- "root\\r" } timeout { puts "\\nKC_NOLOGIN"; exit 0 }\n'
+    # The first boot hands tty1 to confconsole --usage (inithooks.service),
+    # and the login prompt comes when the operator leaves it with Quit, its
+    # one button: Enter, once its title is on the screen. Enter on a screen
+    # with no prompt draws it again.
+    printf 'set tries 0\nsleep 1\nsend -- "\\r"\n'
+    printf 'expect -timeout 15 -re {login: *$} { send -- "root\\r" } -ex {appliance services} { sleep 1; send -- "\\r"; exp_continue } timeout { incr tries; if {$tries > 8} { puts "\\nKC_NOLOGIN"; exit 0 }; send -- "\\r"; exp_continue }\n'
     printf 'expect -timeout 30 -ex {Password:} { send -- "%s\\r" } timeout { puts "\\nKC_NOLOGIN"; exit 0 }\n' \
         "$KC_LOGIN_SECRET"
     printf 'expect {\n'
