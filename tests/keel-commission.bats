@@ -392,7 +392,7 @@ EOF
     ! grep -rq "$login" "$OUT"
     [[ "$output" == *"pass  console.login"* ]]
     # no check sources the .bashrc of root, which opens confconsole once
-    grep -q 'pct exec 9001 -- bash --norc -s' "$LOG"
+    grep -q 'pct exec 9001 -- env PATH=/usr/local/sbin:/usr/local/bin:.* bash --norc -s' "$LOG"
 }
 
 @test "interactive: a console that gives no root login" {

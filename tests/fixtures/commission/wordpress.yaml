@@ -50,6 +50,8 @@ instance:
     nginx: enabled
     coraza: disabled
     anubis: disabled
+    # keel 0.23.82 refuses a spec that leaves out an overlay of the chain
+    syncthing: disabled
   secrets:
     root_password: secret:root
     db_password: secret:db

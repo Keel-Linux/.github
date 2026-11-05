@@ -18,7 +18,9 @@ guest_sh() {
     # --norc: bash sources ~/.bashrc when it sees SSH_CLIENT, which pct exec
     # passes on from the ssh session, and the .bashrc of root starts
     # confconsole once (BR2, 2026-11-05): a check must not spend that.
-    pve "pct exec $KC_VMID -- bash --norc -s"
+    # pct exec keeps the PATH of the PVE host's shell, without /usr/local,
+    # where an appliance keeps tools such as wp-cli: a login has it
+    pve "pct exec $KC_VMID -- env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash --norc -s"
 }
 
 # template_sha VOLID: the sha256 of the template file the pass boots.
