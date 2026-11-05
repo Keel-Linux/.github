@@ -143,6 +143,9 @@ write_meta() {
 
 pass_interactive() {
     local questions="$KC_WORK/questions" script="$KC_WORK/console.exp"
+    # without expect the console is never driven, and every question would
+    # fail as if keel-init had not asked it (BR1, 2026-11-05)
+    pve 'command -v expect' >/dev/null || die 3 "the PVE host has no expect: apt-get install expect"
     ct_create "$KC_TEMPLATE" >/dev/null || die 3 "pct create failed"
     ct_start || die 3 "pct start failed"
     boot_or_fail || return 0
