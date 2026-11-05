@@ -14,171 +14,7 @@
 
 bats_require_minimum_version 1.5.0
 
-KC="$BATS_TEST_DIRNAME/../bin/keel-commission"
-CONTRACT_PY="$BATS_TEST_DIRNAME/../lib/commission/contract.py"
-WP="$BATS_TEST_DIRNAME/fixtures/commission/wordpress.yaml"
-
-setup() {
-    TMP="$(mktemp -d)"
-    FAKES="$TMP/fakes"
-    GUEST="$TMP/guest"
-    GBIN="$TMP/gbin"
-    STATE="$TMP/state"
-    OUT="$TMP/out"
-    LOG="$TMP/log"
-    mkdir -p "$FAKES" "$GBIN" "$STATE" "$GUEST/etc/default" "$GUEST/var/log" \
-        "$GUEST/var/mail" "$GUEST/usr/lib/inithooks/firstboot.d" "$GUEST/9001/rootfs/etc"
-    : > "$LOG"
-    export TMP FAKES GUEST GBIN STATE OUT LOG
-    export KC_PVE="$FAKES/pve" KC_POLL=1 KC_BOOT_TIMEOUT=2 KC_MAIL_WAIT=0
-    export KC_CONSOLE_TIMEOUT=1 KC_CONSOLE_STEPS=3
-    PATH="$FAKES:$PATH"
-    export PATH
-
-    # the PVE host: run the command string here
-    cat > "$FAKES/pve" <<'EOF'
-#!/bin/bash
-printf 'pve %s\n' "$*" >> "$LOG"
-[ -e "$STATE/no-expect" ] && [ "$*" = "command -v expect" ] && exit 1
-exec bash -c "$*"
-EOF
-
-    cat > "$FAKES/pvesm" <<'EOF'
-#!/bin/bash
-printf 'template bytes\n' > "$TMP/template"
-echo "$TMP/template"
-EOF
-
-    # pct: create/start/... by state files, exec by running the guest script
-    cat > "$FAKES/pct" <<'EOF'
-#!/bin/bash
-printf 'pct %s\n' "$*" >> "$LOG"
-case "$1" in
-    status) [ -e "$STATE/exists" ] ;;
-    create) [ ! -e "$STATE/create-fails" ] && touch "$STATE/exists" ;;
-    start) [ ! -e "$STATE/start-fails" ] && cp "$STATE/boot-done" "$GUEST/etc/default/inithooks" 2>/dev/null; [ ! -e "$STATE/start-fails" ] ;;
-    stop|destroy|unmount) rm -f "$STATE/exists"; [ "$1" != unmount ] || touch "$STATE/unmounted" ;;
-    mount) [ -e "$STATE/mount-odd" ] && { echo "mounted CT $2 somewhere"; exit 0; }
-           [ ! -e "$STATE/mount-fails" ] && echo "mounted CT $2 in '$GUEST/$2/rootfs'" ;;
-    exec)
-        sed -e "s#/etc/default/#$GUEST/etc/default/#g" -e "s#/var/#$GUEST/var/#g" \
-            -e "s#/usr/lib/inithooks/#$GUEST/usr/lib/inithooks/#g" \
-            | PATH="$GBIN:$PATH" bash -s ;;
-esac
-EOF
-
-    # expect: keep the script, print the screen the case asked for
-    cat > "$FAKES/expect" <<'EOF'
-#!/bin/bash
-cp "$1" "$TMP/console.exp"
-cat "$STATE/screen" 2>/dev/null
-EOF
-
-    # the guest's commands
-    cat > "$GBIN/systemctl" <<'EOF'
-#!/bin/bash
-grep -qx "${*: -1}" "$STATE/active" 2>/dev/null
-EOF
-    cat > "$GBIN/mysql" <<'EOF'
-#!/bin/bash
-case "$*" in
-    *"SHOW DATABASES"*) cat "$STATE/databases" 2>/dev/null ;;
-    *) [ -n "${MYSQL_PWD:-}" ] && grep -qx "$MYSQL_PWD" "$STATE/db-pass" 2>/dev/null ;;
-esac
-EOF
-    cat > "$GBIN/psql" <<'EOF'
-#!/bin/bash
-case "$*" in
-    *pg_database*) cat "$STATE/databases" 2>/dev/null ;;
-    *) [ -n "${PGPASSWORD:-}" ] && grep -qx "$PGPASSWORD" "$STATE/db-pass" 2>/dev/null ;;
-esac
-EOF
-    cat > "$GBIN/runuser" <<'EOF'
-#!/bin/bash
-shift 3
-"$@"
-EOF
-    cat > "$GBIN/curl" <<'EOF'
-#!/bin/bash
-code=$(grep -F "${*: -1} " "$STATE/urls" 2>/dev/null | cut -d' ' -f2)
-printf '%s' "${code:-000}"
-EOF
-    cat > "$GBIN/getent" <<'EOF'
-#!/bin/bash
-cat "$STATE/shadow" 2>/dev/null
-EOF
-    cat > "$GBIN/wp" <<'EOF'
-#!/bin/bash
-grep -qx "${*: -1}" "$STATE/app-pass" 2>/dev/null
-EOF
-    cat > "$GBIN/postconf" <<'EOF'
-#!/bin/bash
-cat "$STATE/myhostname"
-EOF
-    cat > "$GBIN/hostname" <<'EOF'
-#!/bin/bash
-[ "${1:-}" = -f ] && echo kc9001.example.invalid || echo kc9001
-EOF
-    chmod +x "$FAKES"/* "$GBIN"/*
-    printf 'RUN_FIRSTBOOT=false\n' > "$STATE/boot-done"
-    printf 'kc9001.example.invalid\n' > "$STATE/myhostname"
-}
-
-teardown() {
-    rm -rf "$TMP"
-}
-
-# a contract with one secret of each proof kind
-small_contract() {
-    cat > "$TMP/c.yaml" <<'EOF'
-contract: 1
-appliance: demo
-secrets: [root, db]
-questions:
-  - {id: root_password, hook: 30rootpass, prompt: Root Password, answer: secret:root}
-  - {id: db_password, hook: 35mysqlpass, prompt: MariaDB password, answer: secret:db}
-  - {id: email, hook: 85secalerts, prompt: Email, answer: admin@example.invalid}
-instance:
-  secrets: {root_password: secret:root, db_password: secret:db}
-proofs:
-  - {secret: root, kind: shadow, user: root}
-  - {secret: db, kind: mysql, user: admin}
-services: [nginx]
-urls:
-  - {url: 'https://127.0.0.1/', status: 200}
-forbidden:
-  - {kind: mysql-database, name: keel_check}
-  - {kind: hook, name: 40lnmp-check}
-  - {kind: path, name: /etc/forbidden}
-EOF
-}
-
-# the machine as it should be, with the passwords of the console answers
-good_machine() {
-    printf 'nginx\n' > "$STATE/active"
-    printf 'https://127.0.0.1/ 200\n' > "$STATE/urls"
-}
-
-# a screen where keel-init asked every question of small_contract, and the
-# shadow and database passwords set to what was typed: the fake expect
-# cannot type, so the case reads the answers from the script it was given.
-answering_expect() {
-    cat > "$FAKES/expect" <<'EOF'
-#!/bin/bash
-cp "$1" "$TMP/console.exp"
-root=$(sed -n 's/.*KC_SEEN root_password.* 80\]\([^"]*\)\\r".*/\1/p' "$1")
-db=$(sed -n 's/.*KC_SEEN db_password.* 80\]\([^"]*\)\\r".*/\1/p' "$1")
-printf 'root:%s:20000:0:99999:7:::\n' "$(perl -e 'print crypt($ARGV[0], q{$6$saltsalt$})' "$root")" > "$STATE/shadow"
-printf '%s\n' "$db" > "$STATE/db-pass"
-cat "$STATE/screen"
-EOF
-    chmod +x "$FAKES/expect"
-}
-
-run_pass() {
-    run "$KC" --contract "$TMP/c.yaml" --template local:vztmpl/t.tar.zst \
-        --vmid 9001 --pass "$1" --site br2 --out "$OUT" "${@:2}"
-}
+load commission
 
 # ---- contract ---------------------------------------------------------
 
@@ -296,9 +132,12 @@ EOF
     run_pass lxc-interactive --vmid x
     [ "$status" -eq 2 ]
     [[ "$output" == *"is not a container id"* ]]
-    run_pass vm-iso
+    run_pass vm-lxc
     [ "$status" -eq 2 ]
-    [[ "$output" == *"is not lxc-interactive or lxc-preseed"* ]]
+    [[ "$output" == *"is not lxc-interactive, lxc-preseed, vm-iso, cloud_simple or cloud_advanced"* ]]
+    run "$KC" --contract "$TMP/c.yaml" --vmid 9001 --pass lxc-preseed --site br2 --out "$OUT"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"needs --template"* ]]
     KC_PVE="" run_pass lxc-interactive
     [ "$status" -eq 2 ]
     [[ "$output" == *"KC_PVE is not set"* ]]

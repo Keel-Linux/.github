@@ -84,3 +84,52 @@ urls:
 forbidden:
   - {kind: mysql-database, name: keel_check}
   - {kind: hook, name: 40lnmp-check}
+# The web pages of the gallery (decision 0075): the site, the backend
+# before and after the login with the app secret, and Webmin with the root
+# secret. A URL is a path on the machine; the port is 443 unless named.
+screenshots:
+  - {name: site, url: /}
+  - name: wp-admin
+    url: /wp-login.php
+    after: /wp-admin/
+    login: {user_field: '#user_login', user: admin, password_field: '#user_pass', secret: app, submit: '#wp-submit'}
+  - name: webmin
+    port: 12321
+    url: /
+    login: {user_field: 'input[name=user]', user: root, password_field: 'input[name=pass]', secret: root, submit: 'button[type=submit]'}
+    wait: 8
+# The cloud modes (decision 0076). The prompts are the titles of the
+# confconsole screens, which are data here: a new title is a change of
+# this file, not of keel-commission. The installer of the vm-iso pass
+# takes the default screens of tkl-installer (no vm section).
+cloud:
+  capture:
+    # keel1: an invite without a VIP, keel2: one that carries it (keel 0.23.83)
+    invite: 'keel[12]:[A-Za-z0-9_.~+/=-]+'
+    # the label anchors it: the usage screen shows the node's own addresses too
+    vip: 'VIP:? +([0-9a-f]{1,4}(:[0-9a-f]{0,4}){2,7})'
+  checks:
+    - {id: vip-holder, at: all, run: 'keel vip status', match: 'holder', count: 1}
+    - {id: row-through-vip, at: replica, secret: db, run: 'MYSQL_PWD="$SECRET" mysql -h "$VIP" -u wordpress -N -e "SELECT 1"'}
+    - {id: files-follow, at: replica, run: 'keel vip status', match: 'files: from '}
+    - {id: promote, at: replica, run: 'keel vip promote'}
+    - {id: promoted-holder, at: replica, run: 'keel vip status', match: 'holder'}
+    - {id: return, at: primary, run: 'keel vip promote'}
+    - {id: returned-holder, at: primary, run: 'keel vip status', match: 'holder'}
+nodes:
+  - name: primary
+    site: br1
+    mode: cloud_simple
+    role: primary
+    answers:
+      - {id: mode, prompt: Installation mode, keys: '{down}{ret}'}
+      - {id: role, prompt: Role of this node, keys: '{ret}'}
+      - {id: invite, prompt: Invite a node, keys: '{ret}'}
+  - name: replica
+    site: br2
+    mode: cloud_simple
+    role: replica
+    answers:
+      - {id: mode, prompt: Installation mode, keys: '{down}{ret}'}
+      - {id: role, prompt: Role of this node, keys: '{down}{ret}'}
+      - {id: join, prompt: Join a mesh, keys: '{invite:1}{ret}'}

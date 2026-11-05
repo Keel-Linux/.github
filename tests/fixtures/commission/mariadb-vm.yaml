@@ -1,0 +1,30 @@
+# The commissioning contract of keel-mariadb with which the vm-iso pass ran
+# on BR1, 2026-11-05, against keel-mariadb-19.0-trixie-amd64.iso: every
+# prompt here is a title read on tty1 of that VM. The installer is the
+# default of screens.py (tkl-installer), so this file has no vm section.
+contract: 1
+appliance: mariadb
+secrets: [root, db]
+questions:
+  - {id: root_password, hook: 30rootpass, prompt: Root Password, answer: secret:root}
+  # without a name the machine keeps "boot", the name of the ISO build
+  - {id: fqdn, hook: 31fqdn, prompt: Fully qualified domain name, answer: kc-mariadb.example.org}
+  - {id: db_password, hook: 35mysqlpass, prompt: MariaDB password, answer: secret:db}
+  # a menu: Enter takes Standalone, the first entry
+  - {id: role, hook: 75keel-role, prompt: Role of this node, answer: '{ret}', type: choice}
+  - {id: alert_email, hook: 85secalerts, prompt: System Notifications, answer: admin@example.org}
+  - {id: email_ok, hook: 85secalerts, prompt: Is your email correct, answer: y, type: choice}
+  - {id: security_updates, hook: 95secupdates, prompt: Security updates, answer: s, type: choice}
+proofs:
+  - {secret: root, kind: shadow, user: root}
+  - {secret: db, kind: mysql, user: admin, host: 127.0.0.1}
+services: [mariadb, webmin, cron]
+urls:
+  - {url: 'https://127.0.0.1:12321/', status: 200}
+screenshots:
+  - name: webmin
+    port: 12321
+    url: /
+    login: {user_field: 'input[name=user]', user: root, password_field: 'input[name=pass]', secret: root, submit: 'button[type=submit]'}
+    after: /
+    wait: 8

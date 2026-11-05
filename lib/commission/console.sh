@@ -23,10 +23,14 @@
 # A screen that is no question of the contract gets Enter, which takes its
 # default, after KC_CONSOLE_TIMEOUT seconds of no change.
 
-# console_script QUESTIONS: print the expect script. QUESTIONS has one
-# "ID<TAB>PROMPT<TAB>ANSWER" line per question, the answer already resolved.
+# console_script QUESTIONS [ANSWERS]: print the expect script. QUESTIONS has
+# one "ID<TAB>PROMPT<TAB>ANSWER" line per question, the answer already
+# resolved. ANSWERS has the screens of a node of a cloud mode (Mode, Role,
+# Join a mesh, ...), one "ID<TAB>PROMPT<TAB>KEYS" line each, KEYS a Tcl
+# string body. The invite lines and the VIP that a capture of the contract
+# finds on the screen are printed as KC_INVITE and KC_VIP lines.
 console_script() {
-    local fmt
+    local fmt what regex captures
     printf 'set timeout %s\n' "$KC_CONSOLE_TIMEOUT"
     printf 'set stty_init "rows 40 columns 120"\n'
     printf 'set launched 0\nset steps 0\n'
@@ -56,6 +60,16 @@ console_script() {
         "$KC_LOGIN_SECRET"
     printf 'expect {\n'
     printf '    -ex {Login incorrect} { puts "\\nKC_NOLOGIN"; exit 0 }\n'
+    # a capture comes before any answer, which would take its screen
+    mapfile -t captures < <(grep $'^capture\t' <<< "$KC_TSV" | cut -f2-)
+    for regex in "${captures[@]}"; do
+        IFS=$'\t' read -r what regex group <<< "$regex"
+        printf '    -re {%s} { puts "\\nKC_%s $expect_out(%s,string)"; exp_continue }\n' "$regex" "${what^^}" "$group"
+    done
+    # a screen of the node and a choice of keel-init get their keys as they
+    # are: no field to empty and no Enter after them
+    awk -F'\t' 'FILENAME != ARGV[1] || $4 == "choice" { printf "    -ex {%s} { step; set launched 1; puts \"\\nKC_SEEN %s\"; send -- \"%s\"; exp_continue }\n", $2, $1, $3 }' \
+        "$1" "${2:-/dev/null}"
     # confconsole is no question: a login that opens it and not keel-init
     # is recorded, and it is left as an operator leaves it, by its Advanced
     # Menu and Quit. Escape only moves between its menus, and killing it
@@ -77,7 +91,7 @@ console_script() {
     # and its confirmation get the answer. Each answer is typed into an
     # emptied field: an input box can come with a value in it.
     fmt='    -ex {%s} { step; set launched 1; set s "$expect_out(buffer)[settle]"; if {[string match {*Choose how to set this password*} $s]} { send -- "M"; sleep 0.3; send -- "\\r" } else { puts "\\nKC_SEEN %s"; send -- "[string repeat "\\x7f" 80]%s\\r" }; exp_continue }\n'
-    awk -F'\t' -v fmt="$fmt" '{ printf fmt, $2, $1, $3 }' "$1"
+    awk -F'\t' -v fmt="$fmt" '$4 != "choice" { printf fmt, $2, $1, $3 }' "$1"
     printf '    -ex {keel-init} { if {!$launched} { puts "\\nKC_HINT" }; exp_continue }\n'
     printf '    -re {#\\s*(\\x1b\\[[0-9;]*m)*\\s*$} {\n'
     printf '        if {![quiet]} { step; exp_continue }\n'
@@ -97,7 +111,24 @@ console_run() {
         < "$1" > "$2" 2>&1
 }
 
-# console_parse TRANSCRIPT QUESTIONS: record what the console did.
+# console_frames TRANSCRIPT TABLE: the screens of the console as text
+# frames, one for each answered screen: KC_DIR/screens/NN-ID.txt holds what
+# the console showed since the frame before, and a row of the guide names
+# it with the answer, masked. TABLE is answers_table's (vm.sh).
+console_frames() {
+    local id keys i ids
+    mkdir -p "$KC_DIR/screens"
+    # the last 60 lines before each KC_SEEN, the size of the terminal and more
+    awk -v dir="$KC_DIR/screens" '/^KC_SEEN / { n++; f = sprintf("%s/%02d-%s.txt", dir, n, $2); for (i = (c > 60 ? c - 59 : 1); i <= c; i++) print buf[i] > f; close(f); c = 0; next } /^KC_/ { next } { buf[++c] = $0 }' "$1"
+    mapfile -t ids < <(sed -n 's/^KC_SEEN //p' "$1")
+    for i in "${!ids[@]}"; do
+        id="${ids[$i]}"
+        keys=$(awk -F'\t' -v id="$id" '$1 == id { print $3; exit }' "$2")
+        screen_row "$(printf '%02d-%s.txt' "$((i + 1))" "$id")" "$keys"
+    done
+}
+
+# console_parse TRANSCRIPT QUESTIONS [ANSWERS]: record what the console did.
 console_parse() {
     local raw="$1" transcript="${1%.log}.txt" id prompt first_seen launch qlines line
     # the screen as text: the escape sequences out, one marker per line
@@ -118,7 +149,8 @@ console_parse() {
     else
         record fail login.keel-init "the login neither starts keel-init nor says to run it"
     fi
-    mapfile -t qlines < "$2"
+    # the node's own screens (ANSWERS, when there is one) count as questions
+    mapfile -t qlines < <(cat "${3:-/dev/null}" "$2")
     for line in "${qlines[@]}"; do
         id="${line%%$'\t'*}"
         prompt="${line#*$'\t'}"
