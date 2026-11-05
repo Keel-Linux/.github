@@ -378,7 +378,7 @@ EOF
     grep -q $'^sha256\t[0-9a-f]\{64\}$' "$OUT/lxc-interactive/meta"
     root=$(sed -n 's/.*KC_SEEN root_password.* 80\]\([^"]*\)\\r".*/\1/p' "$TMP/console.exp")
     [ "${#root}" -eq 24 ]
-    ! grep -rq "$root" "$OUT"
+    [ -z "$(grep -rl "$root" "$OUT")" ]
     grep -q 'stty_init "rows 40 columns 120"' "$TMP/console.exp"
     grep -q 'pct console 9001' "$TMP/console.exp"
     grep -q '80\]admin@example.invalid' "$TMP/console.exp"
@@ -389,7 +389,7 @@ EOF
     [ "${#login}" -eq 24 ]
     [ "$login" != "$root" ]
     grep -q -- "--password '$login'" "$LOG"
-    ! grep -rq "$login" "$OUT"
+    [ -z "$(grep -rl "$login" "$OUT")" ]
     [[ "$output" == *"pass  console.login"* ]]
     # no check sources the .bashrc of root, which opens confconsole once
     grep -q 'pct exec 9001 -- env PATH=/usr/local/sbin:/usr/local/bin:.* bash --norc -s' "$LOG"
@@ -439,7 +439,7 @@ EOF
     f="$GUEST/9001/rootfs/etc/keel/instance.yaml"
     [ "$(stat -c %a "$f")" = 600 ]
     grep -q 'file: /etc/keel/secrets/root_password' "$f"
-    ! grep -q '[A-Za-z0-9]\{24\}' "$f"
+    [ -z "$(grep "[A-Za-z0-9]\{24\}" "$f")" ]
     s="$GUEST/9001/rootfs/etc/keel/secrets"
     [ "$(stat -c %a "$s")" = 700 ]
     [ "$(stat -c %a "$s/db_password")" = 600 ]
