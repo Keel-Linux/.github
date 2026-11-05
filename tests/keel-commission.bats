@@ -39,6 +39,7 @@ setup() {
     cat > "$FAKES/pve" <<'EOF'
 #!/bin/bash
 printf 'pve %s\n' "$*" >> "$LOG"
+[ -e "$STATE/no-expect" ] && [ "$*" = "command -v expect" ] && exit 1
 exec bash -c "$*"
 EOF
 
@@ -508,4 +509,14 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$output" == *"fail  login.keel-init                          the login neither starts keel-init nor says to run it"* ]]
     [ -s "$OUT/lxc-interactive/console.txt" ]
+}
+
+@test "interactive: a PVE host without expect is refused before a container is made" {
+    small_contract
+    touch "$STATE/no-expect"
+    run_pass lxc-interactive
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"the PVE host has no expect"* ]]
+    run grep -c 'pct create' "$LOG"
+    [ "$output" = 0 ]
 }
