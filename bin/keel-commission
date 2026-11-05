@@ -1,0 +1,236 @@
+#!/bin/bash
+# The commissioning test of decision 0075: make a machine from a template
+# as an operator does, on a Proxmox host, and check that its first boot,
+# its questions and its passwords work.
+#
+# usage: keel-commission --check CONTRACT
+#        keel-commission --contract CONTRACT --template VOLID --vmid N
+#                        --pass lxc-interactive|lxc-preseed --site NAME
+#                        --out DIR [--keep]
+#
+#   --check      only read the contract (tests/commission.yaml of the
+#                appliance) and say whether it is valid
+#   --template   the template volume on the PVE host, for example
+#                local:vztmpl/debian-13-keel-wordpress_19.0-12_amd64.tar.zst
+#   --vmid       a free container id; one that exists is never touched
+#   --pass       lxc-interactive: nothing preseeded, a root login answers
+#                keel-init with the contract's answers;
+#                lxc-preseed: the contract's instance description is put in
+#                the machine before its first boot, and no question may be
+#                left for keel-init
+#   --site       the site name written in the record (br1, br2)
+#   --out        where the record goes: DIR/PASS/record.tsv, meta, and
+#                the console transcript
+#   --keep       leave the machine after the run, to look at it
+#
+# Environment:
+#   KC_PVE              the command that reaches the PVE host (required for
+#                       a pass), e.g. "ssh -o BatchMode=yes root@pve1"
+#   KC_CT_OPTS          more pct create options: storage, network, memory
+#   KC_BOOT_TIMEOUT     seconds to wait for the first boot (900)
+#   KC_MAIL_WAIT        seconds to wait before the mail check (600)
+#   KC_CONSOLE_TIMEOUT  seconds of no change before Enter (6)
+#   KC_CONSOLE_STEPS    Enters before the console is stuck (90)
+#
+# Exit: 0 every check passed, 1 a check failed, 2 usage or an invalid
+# contract, 3 the PVE host did not make or start the machine, 4 the vmid
+# is in use.
+#
+# The secrets are made fresh for each run, are never the defaults and are
+# never written to the record: the record says which login worked, not
+# with what.
+set -uo pipefail
+
+KC_LIB="$(cd "$(dirname "$0")/../lib/commission" && pwd)"
+# shellcheck source=lib/commission/pve.sh
+. "$KC_LIB/pve.sh"
+# shellcheck source=lib/commission/console.sh
+. "$KC_LIB/console.sh"
+# shellcheck source=lib/commission/checks.sh
+. "$KC_LIB/checks.sh"
+
+KC_BOOT_TIMEOUT="${KC_BOOT_TIMEOUT:-900}"
+KC_MAIL_WAIT="${KC_MAIL_WAIT:-600}"
+KC_CONSOLE_TIMEOUT="${KC_CONSOLE_TIMEOUT:-6}"
+KC_CONSOLE_STEPS="${KC_CONSOLE_STEPS:-90}"
+KC_POLL="${KC_POLL:-10}"
+KC_CT_OPTS="${KC_CT_OPTS:-}"
+KC_KEEP=0
+
+usage() {
+    sed -n '/^# usage:/,/^#   --keep/s/^# \{0,1\}//p' "$0" >&2
+    exit 2
+}
+
+die() {
+    echo "keel-commission: $2" >&2
+    exit "$1"
+}
+
+declare -A KC_SECRETS
+
+# new_secret: 24 letters and digits, never a default and safe on a
+# terminal.
+new_secret() {
+    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24
+}
+
+secret_value() {
+    printf '%s' "${KC_SECRETS[$1]}"
+}
+
+# resolve ANSWER: a literal answer, or the value of "secret:NAME".
+resolve() {
+    case "$1" in
+        secret:*) secret_value "${1#secret:}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+parse_args() {
+    KC_CONTRACT="" KC_TEMPLATE="" KC_VMID="" KC_PASS="" KC_SITE="" KC_OUT=""
+    KC_CHECK_ONLY=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --check) KC_CHECK_ONLY=1; KC_CONTRACT="${2:-}"; shift ;;
+            --contract) KC_CONTRACT="${2:-}"; shift ;;
+            --template) KC_TEMPLATE="${2:-}"; shift ;;
+            --vmid) KC_VMID="${2:-}"; shift ;;
+            --pass) KC_PASS="${2:-}"; shift ;;
+            --site) KC_SITE="${2:-}"; shift ;;
+            --out) KC_OUT="${2:-}"; shift ;;
+            --keep) KC_KEEP=1 ;;
+            *) usage ;;
+        esac
+        shift
+    done
+    [ -n "$KC_CONTRACT" ] || usage
+    [ "$KC_CHECK_ONLY" = 1 ] && return 0
+    if [ -z "$KC_TEMPLATE" ] || [ -z "$KC_SITE" ] || [ -z "$KC_OUT" ]; then
+        usage
+    fi
+    [[ "$KC_VMID" =~ ^[1-9][0-9]{2,8}$ ]] || die 2 "--vmid '$KC_VMID' is not a container id"
+    if [ "$KC_PASS" != lxc-interactive ] && [ "$KC_PASS" != lxc-preseed ]; then
+        die 2 "--pass '$KC_PASS' is not lxc-interactive or lxc-preseed"
+    fi
+    [ -n "${KC_PVE:-}" ] || die 2 "KC_PVE is not set: nothing reaches the PVE host"
+}
+
+load_contract() {
+    KC_TSV=$(python3 -I "$KC_LIB/contract.py" tsv "$KC_CONTRACT") || exit 2
+}
+
+# questions_file FILE: one "ID<TAB>PROMPT<TAB>ANSWER" line per question,
+# with the answers resolved.
+questions_file() {
+    local rows row f
+    mapfile -t rows < <(grep $'^question\t' <<< "$KC_TSV")
+    : > "$1"
+    chmod 0600 "$1"
+    for row in "${rows[@]}"; do
+        IFS=$'\t' read -r -a f <<< "$row"
+        printf '%s\t%s\t%s\n' "${f[1]}" "${f[3]}" "$(resolve "${f[4]}")" >> "$1"
+    done
+}
+
+write_meta() {
+    local sha contract
+    sha=$(template_sha "$KC_TEMPLATE")
+    contract=$(sha256sum "$KC_CONTRACT" | cut -d' ' -f1)
+    printf 'pass\t%s\nsite\t%s\ntemplate\t%s\nsha256\t%s\ncontract\t%s\ndate\t%s\n' \
+        "$KC_PASS" "$KC_SITE" "$KC_TEMPLATE" "$sha" "$contract" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$KC_DIR/meta"
+}
+
+pass_interactive() {
+    local questions="$KC_WORK/questions" script="$KC_WORK/console.exp"
+    ct_create "$KC_TEMPLATE" >/dev/null || die 3 "pct create failed"
+    ct_start || die 3 "pct start failed"
+    boot_or_fail || return 0
+    questions_file "$questions"
+    console_script "$questions" > "$script"
+    console_run "$script" "$KC_DIR/console.log"
+    console_parse "$KC_DIR/console.log" "$questions"
+}
+
+pass_preseed() {
+    local instance="$KC_WORK/instance.yaml" hook
+    (umask 077; python3 -I "$KC_LIB/contract.py" instance "$KC_CONTRACT" > "$instance") || exit 2
+    ct_create "$KC_TEMPLATE" >/dev/null || die 3 "pct create failed"
+    if ct_write_instance "$instance"; then
+        record pass instance.written /etc/keel/instance.yaml
+    else
+        record fail instance.written "could not write /etc/keel/instance.yaml"
+    fi
+    ct_start || die 3 "pct start failed"
+    boot_or_fail || return 0
+    local hooks
+    mapfile -t hooks < <(grep $'^question\t' <<< "$KC_TSV" | cut -f3 | sort -u)
+    for hook in "${hooks[@]}"; do
+        check_not_deferred "$hook"
+    done
+}
+
+boot_or_fail() {
+    if ct_wait_firstboot; then
+        record pass firstboot.finished "the first boot ran to its end"
+        return 0
+    fi
+    record fail firstboot.finished "no end of the first boot after ${KC_BOOT_TIMEOUT}s"
+    return 1
+}
+
+common_checks() {
+    local kind a b c d e
+    while IFS=$'\t' read -r kind a b c d e; do
+        case "$kind" in
+            proof) check_proof "$a" "$b" "$c" "$d" "$e" ;;
+            service) check_service "$a" ;;
+            url) check_url "$a" "$b" ;;
+            forbid) check_forbid "$a" "$b" ;;
+        esac
+    done <<< "$KC_TSV"
+    check_hygiene
+    check_mail
+}
+
+main() {
+    local name
+    parse_args "$@"
+    load_contract
+    if [ "$KC_CHECK_ONLY" = 1 ]; then
+        echo "keel-commission: $KC_CONTRACT is a valid contract"
+        exit 0
+    fi
+    if pve "pct status $KC_VMID" >/dev/null 2>&1; then
+        die 4 "container $KC_VMID exists; keel-commission only uses a free id"
+    fi
+    local names
+    mapfile -t names < <(grep $'^secret\t' <<< "$KC_TSV" | cut -f2)
+    for name in "${names[@]}"; do
+        KC_SECRETS[$name]=$(new_secret)
+        export "KC_SECRET_$name=${KC_SECRETS[$name]}"
+    done
+    KC_DIR="$KC_OUT/$KC_PASS"
+    KC_RECORD="$KC_DIR/record.tsv"
+    KC_WORK=$(mktemp -d)
+    trap 'rm -rf "$KC_WORK"' EXIT
+    mkdir -p "$KC_DIR"
+    : > "$KC_RECORD"
+    write_meta
+    if [ "$KC_PASS" = lxc-interactive ]; then
+        pass_interactive
+    else
+        pass_preseed
+    fi
+    common_checks
+    ct_destroy
+    if grep -q $'^fail\t' "$KC_RECORD"; then
+        printf 'result\tfail\n' >> "$KC_DIR/meta"
+        echo "keel-commission: FAIL, $(grep -c $'^fail\t' "$KC_RECORD") checks failed: $KC_RECORD"
+        exit 1
+    fi
+    printf 'result\tpass\n' >> "$KC_DIR/meta"
+    echo "keel-commission: PASS: $KC_RECORD"
+}
+
+main "$@"

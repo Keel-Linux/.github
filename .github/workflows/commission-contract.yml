@@ -1,0 +1,62 @@
+# Reusable: an appliance repository must carry a valid commissioning
+# contract, tests/commission.yaml (decision 0075).
+#
+# The contract says what the first boot of the appliance asks, which login
+# proves each password, which URLs answer and which services run.
+# bin/keel-commission reads it to commission the template on BR1 and BR2,
+# and keel-release publishes nothing without a passing record. This job
+# only checks that the contract is there and valid, so no appliance can
+# leave it out. It runs no machine.
+#
+# A caller job named "commission" produces the status check
+# "commission / contract".
+name: commission-contract
+
+on:
+  workflow_call:
+    inputs:
+      contract:
+        description: path of the contract in the appliance repository
+        required: false
+        type: string
+        default: tests/commission.yaml
+      tooling_ref:
+        description: ref of keel-linux/.github to take bin/keel-commission from
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: keel-host
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out the shared tooling
+        uses: actions/checkout@v7
+        with:
+          repository: keel-linux/.github
+          ref: ${{ inputs.tooling_ref }}
+          path: .keel-ci
+      - name: The commissioning contract is there and valid
+        env:
+          CONTRACT: ${{ inputs.contract }}
+        run: |
+          set -o pipefail
+          status=0
+          if [ ! -f "$CONTRACT" ]; then
+            echo "no $CONTRACT: an appliance without a commissioning contract cannot be released (decision 0075)" | tee contract.txt
+            status=1
+          else
+            .keel-ci/bin/keel-commission --check "$CONTRACT" 2>&1 | tee contract.txt || status=$?
+          fi
+          {
+            echo "## Commissioning contract"
+            echo '```'
+            cat contract.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
