@@ -99,16 +99,14 @@ invites() {
 
 # nodes_mask: an invite line lets a machine into the mesh, so no file of
 # the pass keeps one: each is replaced by "<invite N>" once the pass is
-# over.
+# over. So is each piece of it of 12 characters or more: an input box
+# narrower than the invite shows it as windows that slide while it is
+# typed, and the frame of the join screen kept them (BR2, 2026-11-06).
 nodes_mask() {
-    local i file lines files
+    local lines
     mapfile -t lines < <(invites "$KC_OUT/$KC_PASS/${KC_NODES[0]%%$'\t'*}/console.log")
-    for i in "${!lines[@]}"; do
-        mapfile -t files < <(grep -rlF -- "${lines[$i]#KC_INVITE }" "$KC_OUT/$KC_PASS")
-        for file in "${files[@]}"; do
-            python3 -I -c 'import sys; p, v, n = sys.argv[1:]; t = open(p, "rb").read(); open(p, "wb").write(t.replace(v.encode(), ("<invite %s>" % n).encode()))' "$file" "${lines[$i]#KC_INVITE }" "$((i + 1))"
-        done
-    done
+    [ "${#lines[@]}" -gt 0 ] || return 0
+    printf '%s\n' "${lines[@]#KC_INVITE }" | python3 -I "$KC_LIB/mask.py" "$KC_OUT/$KC_PASS"
 }
 
 # node_run: one node from its creation to its checks, in its subshell.

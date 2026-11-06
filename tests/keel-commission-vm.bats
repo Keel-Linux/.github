@@ -487,7 +487,7 @@ run_cloud() {
     # the bytes of a screen, as the raw console of a real node holds them:
     # grep without -a reads such a log as binary and prints no line
     printf '\033[2J\000\001\nKC_HINT\nKC_SEEN mode\nInvite a node\nKC_INVITE keel1:SECRETTOKEN\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
-    printf 'KC_HINT\nkeel1:SECRETTOKEN pasted\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    printf 'KC_HINT\nkeel1:SECRETTOKEN pasted\nx1:SECRETTOKENx\nxel1:SECRETTOKx\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
     printf 'vip fd00::ffff:1: holder\n3 voter(s)\n' > "$STATE/keel.9001"
     printf 'vip fd00::ffff:1: follower\n' > "$STATE/keel.9002"
     run_cloud
@@ -521,6 +521,9 @@ run_cloud() {
     # no file of the run keeps the invite
     [ -z "$(grep -rl SECRETTOKEN "$OUT")" ]
     grep -q '<invite 1> pasted' "$OUT/cloud_simple/two/console.txt"
+    # the windows of an input box narrower than the invite: pieces of it
+    [ -z "$(grep -rl 'ECRETTOK' "$OUT")" ]
+    grep -qx 'x<invite 1>x' "$OUT/cloud_simple/two/screens/01-join.txt"
     grep -qx $'01\tjoin\tscreens/01-join.txt\t(invite 1 of the first node)<ret>' "$OUT/cloud_simple/two/screens.tsv"
     grep -q '| Step | one, primary (br1) | two, replica (br2) |' "$OUT/guide.md"
     grep -qx $'result\tpass' "$OUT/cloud_simple/meta"
