@@ -12,7 +12,10 @@ The lines they add to `contract.py tsv`, fields separated by a tab:
     nshot      NODE  NAME ...             a web screenshot of that node only:
                                           a node with nshot lines takes them
                                           in place of the shot lines
-    node       NAME  SITE  KIND  IMAGE  MODE  ROLE
+    node       NAME  SITE  KIND  IMAGE  MODE  ROLE  CONTRACT
+                                          CONTRACT the absolute path of the
+                                          contract of the node's appliance,
+                                          "-" for this one
     answer     NODE  ID  PROMPT  KEYS     a screen of that node only
     capture    WHAT  REGEX  GROUP         invite or vip, read on a screen;
                                           GROUP 1 when REGEX has a group
@@ -32,6 +35,7 @@ read there. Only the runner resolves them, and only when it types them.
 import re
 
 NAME = re.compile(r"^[a-z][a-z0-9_]*$")
+CONTRACT = re.compile(r"^[A-Za-z0-9_./-]+\.ya?ml$")
 NODE = re.compile(r"^[a-z][a-z0-9-]*$")
 PROMPT = re.compile(r"^[A-Za-z0-9 ._:()/'-]+$")
 PATH = re.compile(r"^/[^\s\t'\"\\]*$")
@@ -386,7 +390,14 @@ def check_node(item, secrets, captures, errors):
         errors.append("node %s: role %r is not one of %s" % (name, role, ", ".join(sorted(ROLES))))
     if image and not VOLID.match(image):
         errors.append("node %s: image %r is not a volume id" % (name, image))
-    rows = [["node", name, site, str(kind), image or "-", str(mode), str(role)]]
+    # contract: the contract of another appliance, for a node of it in this
+    # set (the Keel Core witness): its questions, proofs, checks and
+    # screenshots replace this one's on that node
+    other = item.get("contract", "")
+    if not isinstance(other, str) or (other and not CONTRACT.match(other)):
+        errors.append("node %s: contract %r is not a file name" % (name, other))
+        other = ""
+    rows = [["node", name, site, str(kind), image or "-", str(mode), str(role), other or "-"]]
     answers = item.get("answers")
     answers = [] if answers is None else answers
     if not isinstance(answers, list):

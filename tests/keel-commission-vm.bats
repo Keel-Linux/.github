@@ -590,6 +590,100 @@ run_cloud() {
     [[ "$output" == *"node p: screenshots is not a list"* ]]
 }
 
+# the Keel Core witness of a cloud advanced set: a node of another
+# appliance, with that appliance's contract (decision 0076)
+witness_contract() {
+    cat > "$TMP/core.yaml" <<'EOF'
+contract: 1
+appliance: core
+secrets: [root]
+questions:
+  - {id: root_password, hook: 30rootpass, prompt: Root Password, answer: secret:root}
+  - {id: email, hook: 85secalerts, prompt: Email, answer: admin@example.invalid}
+proofs:
+  - {secret: root, kind: shadow, user: root}
+services: [crowdsec]
+screenshots:
+  - {name: webmin, port: 12321, url: /}
+EOF
+    cat >> "$TMP/c.yaml" <<'EOF'
+  - name: four
+    site: br1
+    mode: cloud_advanced
+    role: primary
+  - name: five
+    site: br2
+    mode: cloud_advanced
+    role: replica
+    answers:
+      - {id: join, prompt: Join a mesh, keys: '{invite:1}{ret}'}
+  - name: three
+    site: br1
+    mode: cloud_advanced
+    role: witness
+    image: local:vztmpl/core.tar.zst
+    contract: core.yaml
+    answers:
+      - {id: join, prompt: Join a mesh, keys: '{invite:2}{ret}'}
+EOF
+}
+
+@test "cloud: a node names the contract of its own appliance, the Keel Core witness" {
+    cloud_contract
+    witness_contract
+    run python3 -I "$CONTRACT_PY" tsv "$TMP/c.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'node\tthree\tbr1\tlxc\tlocal:vztmpl/core.tar.zst\tcloud_advanced\twitness\t'"$(realpath "$TMP/core.yaml")"* ]]
+    [[ "$output" == *$'node\tone\tbr1\tlxc\t-\tcloud_simple\tprimary\t-'* ]]
+    # the witness's own lines: its questions, not the app's
+    KC_LIB="$LIB" KC_NODE=three KC_TSV="$output" run bash -c '. "$KC_LIB/nodes.sh"; node_tsv "$0"' "$(realpath "$TMP/core.yaml")"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'appliance\tcore'* ]]
+    [[ "$output" == *$'service\tcrowdsec'* || "$output" == *crowdsec* ]]
+    [[ "$output" != *"MariaDB password"* ]]
+    [[ "$output" == *$'answer\tthree\tjoin\tJoin a mesh\t{invite:2}{ret}'* ]]
+    [[ "$output" == *$'capture\tinvite\t'* ]]
+    [[ "$output" == *$'wait\tWaiting for the nodes'* ]]
+    [[ "$output" != *$'node\t'* ]]
+}
+
+@test "cloud: the witness of a cloud advanced pass takes its own contract and image" {
+    cloud_contract
+    witness_contract
+    answering_expect
+    good_machine
+    printf 'nginx\ncrowdsec\n' > "$STATE/active"
+    printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:FIRSTINVITE\nKC_INVITE keel1:SECONDINVITE\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN root_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9003"
+    run "$KC" --contract "$TMP/c.yaml" --template local:vztmpl/t.tar.zst \
+        --vmid 9001 --pass cloud_advanced --site br1 --out "$OUT"
+    echo "$output"
+    [[ "$output" == *"pass  three:keel-init.asked.join"* ]]
+    [[ "$output" == *"pass  three:service.crowdsec"* ]]
+    [[ "$output" != *"three:keel-init.asked.db_password"* ]]
+    [[ "$output" != *"three:proof.db"* ]]
+    # the witness is made from its own image, and its console has its own questions
+    grep -q 'pct create 9003 local:vztmpl/core.tar.zst' "$LOG"
+    run ! grep -q 'MariaDB password' "$TMP/console.9003.exp"
+    grep -q 'SECONDINVITE' "$TMP/console.9003.exp"
+}
+
+@test "cloud: the contract a node names is checked" {
+    cloud_contract
+    witness_contract
+    printf 'nodes:\n  - {name: x, site: br1, mode: simple}\n' >> "$TMP/core.yaml"
+    sed -i 's/^secrets: \[root\]$/secrets: [root, other]/' "$TMP/core.yaml"
+    printf '  - {name: six, site: br2, mode: simple, contract: nope.yaml}\n  - {name: seven, site: br2, mode: simple, contract: "a b"}\n' >> "$TMP/c.yaml"
+    run "$KC" --check "$TMP/c.yaml"
+    [ "$status" -eq 2 ]
+    for want in "node three: core.yaml: a contract that a node names has nodes of its own" \
+        "node three: contract core.yaml has secrets this one does not declare: other" \
+        "node six: contract nope.yaml is not a file" "node seven: contract 'a b' is not a file name"; do
+        [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
+    done
+}
+
 @test "cloud: no invite in time, a check that fails, and a mode with no node" {
     cloud_contract
     good_machine
