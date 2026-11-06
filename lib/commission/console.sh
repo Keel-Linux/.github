@@ -62,9 +62,12 @@ console_script() {
     # menu that does not read yet is lost, and the Enter then takes the
     # default: the Mode screen of a cloud replica chose Simple (BR1,
     # 2026-11-06, round 11). A hotkey that draws nothing in 5 seconds is
-    # sent again, at most 3 times. Keys of more than one character are
-    # sent once: a second time would move a menu again.
-    printf '%s\n' 'proc choose {keys} { set head [string range $keys 0 end-1]; if {[string length $keys] < 2 || [string index $keys end] ne "\r" || [string first "\r" $head] >= 0} { send -- $keys; return }; for {set i 0} {$i < 3} {incr i} { send -- $head; set drawn 0; expect -timeout 5 -re {.+} { set drawn 1 } timeout {} eof {}; if {$drawn || [string length $head] > 1} { break } }; sleep 0.3; send -- "\r" }'
+    # sent again, at most 3 times. Hotkeys of several letters ("CC", the
+    # second item of a letter) are sent one at a time in the same way: sent
+    # at once, both were lost and the Enter took Simple (LNPP cloud
+    # advanced, BR2, 2026-11-06). Keys with an escape sequence are sent once:
+    # a second time would move a menu again.
+    printf '%s\n' 'proc choose {keys} { set head [string range $keys 0 end-1]; if {[string length $keys] < 2 || [string index $keys end] ne "\r" || [string first "\r" $head] >= 0} { send -- $keys; return }; if {[string first "\033" $head] >= 0} { send -- $head; expect -timeout 5 -re {.+} {} timeout {} eof {}; sleep 0.3; send -- "\r"; return }; foreach key [split $head ""] { for {set i 0} {$i < 3} {incr i} { send -- $key; set drawn 0; expect -timeout 5 -re {.+} { set drawn 1 } timeout {} eof {}; if {$drawn} { break } } }; sleep 0.3; send -- "\r" }'
     # every screen counts, so no loop between screens runs for ever
     printf 'proc step {} { global steps waiting; set waiting 0; incr steps; if {$steps > %s} { puts "\\nKC_STUCK"; exit 0 } }\n' \
         "$KC_CONSOLE_STEPS"
