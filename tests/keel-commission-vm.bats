@@ -529,6 +529,31 @@ run_cloud() {
     grep -qx $'result\tpass' "$OUT/cloud_simple/meta"
 }
 
+@test "cloud: a node's answer replaces the question of the same id" {
+    # an app contract asks the Mode screen as a question, Simple by Enter, for
+    # its single node passes; the node of a cloud mode answers the same
+    # screen with its hotkey. The question came first in the expect script,
+    # so a cloud node chose Simple (keel-core, 2026-11-06).
+    cloud_contract
+    sed -i "/^questions:/a\\  - {id: mode, hook: 75keel-role, prompt: Installation mode, type: choice, answer: '{ret}'}" "$TMP/c.yaml"
+    good_machine
+    answering_expect
+    printf '#!/bin/bash\nexec bash -c "$*"\n' > "$FAKES/pve2"
+    chmod +x "$FAKES/pve2"
+    export KC_PVE_BR2="$FAKES/pve2" KC_BOOT_TIMEOUT=30
+    printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    printf 'KC_HINT\nKC_SEEN mode\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    printf 'vip fd00::ffff:1: holder\n3 voter(s)\n' > "$STATE/keel.9001"
+    printf 'vip fd00::ffff:1: follower\n' > "$STATE/keel.9002"
+    run_cloud
+    echo "$output"
+    # node one answers the screen with its own keys, and only with them
+    grep -qF 'choose "\033\[B\r"' "$TMP/console.9001.exp"
+    [ "$(grep -cF -- '-ex {Installation mode}' "$TMP/console.9001.exp")" -eq 1 ]
+    # node two has no answer of that id: the question stays
+    grep -qF -- '-ex {Installation mode} { step; set launched 1; settle; sleep 1; puts "\nKC_SEEN mode"; choose "\r"; exp_continue }' "$TMP/console.9002.exp"
+}
+
 @test "cloud: a node with screenshots of its own takes them in place of the contract's" {
     cloud_contract
     sed -i "/keys: '{vip}{ret}'/a\\    screenshots: [{name: notice, url: /wp-login.php, text: This node is the replica}]" "$TMP/c.yaml"
