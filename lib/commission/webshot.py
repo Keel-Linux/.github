@@ -15,7 +15,8 @@ FIRST, WAIT seconds after it has loaded. A shot with a login fills USER_FIELD an
 clicks SUBMIT, and writes a second screenshot, web-NN-NAME-after.png, of
 AFTER (or of the page the login went to). That page must answer with an
 HTTP status below 400 and must not show PASS_FIELD again. When TEXT is
-not empty, the last page (the shot's, or the after-login one) must show it.
+not empty, the last page (the shot's, or the after-login one) must show it,
+and its shot is taken once it shows it (at most KC_WEB_WAIT seconds).
 The password is the value of the
 environment variable KC_SECRET_SECRET: it goes to the browser over the
 DevTools socket only, and never to a file, an argument or stdout.
@@ -221,6 +222,19 @@ class Browser:
             time.sleep(0.5)
         return False
 
+    def wait_text(self, text):
+        """Wait up to the browser's wait until the page shows TEXT. Webmin's
+        dashboard on a VM of BR2 came after the page had stayed still, and
+        the after-login shot showed the menu only (2026-11-06). True when
+        it came."""
+        deadline = time.time() + self.wait
+        probe = "document.body.innerText.includes(%s)" % json.dumps(text)
+        while time.time() < deadline:
+            if self.evaluate(probe):
+                return True
+            time.sleep(0.5)
+        return False
+
     def login(self, user_field, user, pass_field, password, submit):
         fill = ("(function(s, v){var e=document.querySelector(s); if(!e) return false;"
                 " e.focus(); e.value=v; e.dispatchEvent(new Event('input',{bubbles:true}));"
@@ -268,6 +282,8 @@ def take(browser, host, outdir, number, fields):
     browser.open(url_of(host, scheme, port, path))
     if user_field:
         browser.wait_for(user_field)
+    elif text:
+        browser.wait_text(text)
     time.sleep(wait)
     browser.shot(os.path.join(outdir, first))
     if not user_field:
@@ -283,6 +299,8 @@ def take(browser, host, outdir, number, fields):
     if after:
         browser.open(url_of(host, scheme, port, after))
     second = "web-%02d-%s-after.png" % (number, name)
+    if text:
+        browser.wait_text(text)
     time.sleep(wait)
     browser.shot(os.path.join(outdir, second))
     lines.append("%02d\tweb-%s-after\t%s\tafter the login: %s"
