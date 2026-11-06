@@ -42,6 +42,9 @@
 #   KC_VM_FIRMWARE      auto (by the ISO), seabios or ovmf
 #                       (each of the four with _<SITE> for a node's site)
 #   KC_BOOT_TIMEOUT     seconds to wait for the first boot (900)
+#   KC_NODE_WAIT        seconds a node of a cloud pass waits for another
+#                       node: for the invite of the first node, and on a
+#                       screen of cloud.waits (3600)
 #   KC_MAIL_WAIT        seconds to wait before the mail check (600)
 #   KC_CONSOLE_TIMEOUT  seconds of no change before Enter (6)
 #   KC_CONSOLE_STEPS    Enters before the console is stuck (90)
@@ -76,6 +79,7 @@ KC_MAIL_WAIT="${KC_MAIL_WAIT:-600}"
 KC_CONSOLE_TIMEOUT="${KC_CONSOLE_TIMEOUT:-6}"
 KC_CONSOLE_STEPS="${KC_CONSOLE_STEPS:-90}"
 KC_POLL="${KC_POLL:-10}"
+KC_NODE_WAIT="${KC_NODE_WAIT:-3600}"
 KC_CT_OPTS="${KC_CT_OPTS:-}"
 KC_KEEP=0
 KC_SHOT=0

@@ -127,6 +127,7 @@ screenshots:
   - {name: two, url: /}
 cloud:
   capture: {invite: '(', other: x, vip: "a\tb"}
+  waits: ['a{b}']
   checks:
     - not a mapping
     - {id: Bad, at: '!', run: "", match: '(', count: -1, secret: nope}
@@ -146,7 +147,7 @@ EOF
         "url 'x' is not a path" "after 'y z' is not a path" "wait -1 is not 0 to 120" "login is not a mapping" \
         "login.password_field" "login.submit '' is missing" "login.secret 'nope'" "screenshot name 'two'" \
         "cloud.capture.invite: missing )" "cloud.capture.other is not invite or vip" \
-        "cloud.capture.vip has a tab" "a cloud check is not a mapping" "cloud check id 'Bad'" \
+        "cloud.capture.vip has a tab" "cloud.waits: 'a{b}' is not a prompt" "a cloud check is not a mapping" "cloud check id 'Bad'" \
         "run is empty" "at '!' is not a role" "match: missing )" "count -1 is not a number" \
         "secret 'nope' is not declared" "a node is not a mapping" "node name 'Bad'" "site 'B1'" \
         "kind 'box'" "mode 'cloudy'" "role 'king'" "image 'no volid'" "answers is not a list" \
@@ -164,9 +165,10 @@ EOF
     for want in "vm is not a mapping" "screenshots is not a list" "cloud is not a mapping" "nodes is not a list"; do
         [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
     done
-    printf 'contract: 1\nappliance: x\nsecrets: [root]\nquestions: [{id: r, hook: 30rootpass, prompt: R, answer: "secret:root"}]\nproofs: [{secret: root, kind: shadow, user: root}]\nvm: {installer: []}\ncloud: {capture: [1], checks: {}}\n' > "$TMP/c.yaml"
+    printf 'contract: 1\nappliance: x\nsecrets: [root]\nquestions: [{id: r, hook: 30rootpass, prompt: R, answer: "secret:root"}]\nproofs: [{secret: root, kind: shadow, user: root}]\nvm: {installer: []}\ncloud: {capture: [1], checks: {}, waits: x}\n' > "$TMP/c.yaml"
     run "$KC" --check "$TMP/c.yaml"
     [ "$status" -eq 2 ]
+    [[ "$output" == *"cloud.waits is not a list"* ]]
     [[ "$output" == *"vm.installer is not a list of screens"* ]]
     [[ "$output" == *"cloud.capture is not a mapping"* ]]
     [[ "$output" == *"cloud.checks is not a list"* ]]
@@ -448,6 +450,7 @@ cloud:
   capture:
     invite: 'keel1:[A-Za-z0-9_-]+'
     vip: 'VIP (fd00:[0-9a-f:]+)'
+  waits: [Waiting for the nodes]
   checks:
     - {id: holder, at: all, run: 'keel vip status', match: holder, count: 1}
     - {id: row, at: replica, run: 'keel row "$VIP" "$SECRET"', secret: db}
@@ -498,6 +501,9 @@ run_cloud() {
     grep -qF 'send -- "fd00::ffff:1\r"' "$TMP/console.9002.exp"
     grep -qF 'send -- "\033\[B\r"' "$TMP/console.9001.exp"
     grep -qF -- '-re {keel1:[A-Za-z0-9_-]+} { puts "\nKC_INVITE $expect_out(0,string)"; exp_continue }' "$TMP/console.9001.exp"
+    # on a screen that waits for the other node, no key and no step
+    grep -qF -- '-ex {Waiting for the nodes} { set waiting 1; exp_continue }' "$TMP/console.9001.exp"
+    grep -qF -- 'timeout { if {$waiting} { incr waited; if {$waited > 3600} { puts "\nKC_STUCK"; exit 0 }; exp_continue }; step;' "$TMP/console.9001.exp"
     grep -qF -- '-re {VIP (fd00:[0-9a-f:]+)} { puts "\nKC_VIP $expect_out(1,string)"; exp_continue }' "$TMP/console.9001.exp"
     # each site's own PVE host, the vmids one after the other
     grep -q '^pve2 pct create 9002 ' "$LOG"

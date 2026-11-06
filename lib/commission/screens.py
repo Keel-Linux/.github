@@ -12,6 +12,8 @@ The lines they add to `contract.py tsv`, fields separated by a tab:
     answer     NODE  ID  PROMPT  KEYS     a screen of that node only
     capture    WHAT  REGEX  GROUP         invite or vip, read on a screen;
                                           GROUP 1 when REGEX has a group
+    wait       PROMPT                     a screen that waits for another node:
+                                          no key while it is up
     cross      ID  AT  RUN  MATCH  COUNT  SECRET
                                           a check across the nodes ("-"
                                           for an empty field)
@@ -308,6 +310,15 @@ def check_cloud(doc, secrets, errors):
         captures.add(what)
         # GROUP: the part of the match that is the value, for expect
         rows.append(["capture", what, str(regex), str(group)])
+    waits = cloud.get("waits", [])
+    if not isinstance(waits, list):
+        errors.append("cloud.waits is not a list")
+        waits = []
+    for prompt in waits:
+        if not PROMPT.match(str(prompt)):
+            errors.append("cloud.waits: %r is not a prompt" % (prompt,))
+            continue
+        rows.append(["wait", str(prompt)])
     checks = cloud.get("checks", [])
     if not isinstance(checks, list):
         errors.append("cloud.checks is not a list")

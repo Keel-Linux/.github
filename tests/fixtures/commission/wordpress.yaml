@@ -108,6 +108,8 @@ cloud:
     invite: 'keel[12]:[A-Za-z0-9_.~+/=-]+'
     # the label anchors it: the usage screen shows the node's own addresses too
     vip: 'VIP:? +([0-9a-f]{1,4}(:[0-9a-f]{0,4}){2,7})'
+  # the screens on which a node waits for another: no key while they are up
+  waits: [Waiting for the nodes]
   checks:
     - {id: vip-holder, at: all, run: 'keel vip status', match: 'holder', count: 1}
     - {id: row-through-vip, at: replica, secret: db, run: 'MYSQL_PWD="$SECRET" mysql -h "$VIP" -u wordpress -N -e "SELECT 1"'}

@@ -30,7 +30,7 @@
 # string body. The invite lines and the VIP that a capture of the contract
 # finds on the screen are printed as KC_INVITE and KC_VIP lines.
 console_script() {
-    local fmt what regex captures
+    local fmt what regex captures waits
     printf 'set timeout %s\n' "$KC_CONSOLE_TIMEOUT"
     # a line at a time: expect writes into the pipe of ssh, and Tcl keeps a
     # pipe's output until it exits, so the invite of the first node reached
@@ -38,9 +38,9 @@ console_script() {
     # 2026-11-06)
     printf 'fconfigure stdout -buffering line\n'
     printf 'set stty_init "rows 40 columns 120"\n'
-    printf 'set launched 0\nset steps 0\n'
+    printf 'set launched 0\nset steps 0\nset waiting 0\nset waited 0\n'
     # every screen counts, so no loop between screens runs for ever
-    printf 'proc step {} { global steps; incr steps; if {$steps > %s} { puts "\\nKC_STUCK"; exit 0 } }\n' \
+    printf 'proc step {} { global steps waiting; set waiting 0; incr steps; if {$steps > %s} { puts "\\nKC_STUCK"; exit 0 } }\n' \
         "$KC_CONSOLE_STEPS"
     # quiet: true when the screen stays still for 2 seconds. A prompt that is
     # followed by more output was drawn under a program still running
@@ -65,6 +65,14 @@ console_script() {
         "$KC_LOGIN_SECRET"
     printf 'expect {\n'
     printf '    -ex {Login incorrect} { puts "\\nKC_NOLOGIN"; exit 0 }\n'
+    # A screen that waits for another node (the contract's cloud.waits):
+    # while it is up no key is sent and no step is counted, for up to
+    # KC_NODE_WAIT seconds. Enter on it chose its Back button and the first
+    # node never saw the second join (BR1, 2026-11-06). Any answer ends it.
+    mapfile -t waits < <(grep $'^wait\t' <<< "$KC_TSV" | cut -f2)
+    for regex in "${waits[@]}"; do
+        printf '    -ex {%s} { set waiting 1; exp_continue }\n' "$regex"
+    done
     # a capture comes before any answer, which would take its screen
     mapfile -t captures < <(grep $'^capture\t' <<< "$KC_TSV" | cut -f2-)
     for regex in "${captures[@]}"; do
@@ -107,7 +115,8 @@ console_script() {
     # exit logs out to the login prompt of tty1; Ctrl-a q leaves pct console
     printf '        puts "\\nKC_DONE"; send -- "exit\\r"; sleep 1; send -- "\\001q"; expect eof\n'
     printf '    }\n'
-    printf '    timeout { step; send -- "\\r"; exp_continue }\n'
+    printf '    timeout { if {$waiting} { incr waited; if {$waited > %s} { puts "\\nKC_STUCK"; exit 0 }; exp_continue }; step; send -- "\\r"; exp_continue }\n' \
+        "$((KC_NODE_WAIT / KC_CONSOLE_TIMEOUT))"
     printf '    eof { puts "\\nKC_EOF" }\n'
     printf '}\n'
 }

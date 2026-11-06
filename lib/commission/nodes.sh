@@ -62,15 +62,17 @@ node_wants() {
 
 # node_wait LOG PID N VIP: wait until the first node's screen gave N invite
 # lines (and the VIP), and export them as KC_INVITE_1.. and KC_VIP. Fails
-# after KC_BOOT_TIMEOUT seconds, or when the first node's run (PID) ended
-# without them.
+# after KC_NODE_WAIT seconds, or when the first node's run (PID) ended
+# without them. The first node shows its invite after its first boot, its
+# login and every password of keel-init: more than KC_BOOT_TIMEOUT (BR1,
+# 2026-11-06).
 node_wait() {
     local waited=0 i line alive=1 lines
     while [ "$(invites "$1" | wc -l)" -lt "$3" ] \
         || { [ -n "$4" ] && ! grep -q '^KC_VIP ' "$1" 2>/dev/null; }; do
         # one more look after the first node ended: it may have written
         # its last line just before
-        if [ "$alive" = 0 ] || [ "$waited" -ge "$KC_BOOT_TIMEOUT" ]; then
+        if [ "$alive" = 0 ] || [ "$waited" -ge "$KC_NODE_WAIT" ]; then
             return 1
         fi
         kill -0 "$2" 2>/dev/null || alive=0
