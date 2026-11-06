@@ -99,16 +99,42 @@ invites() {
 
 # nodes_mask: an invite line lets a machine into the mesh, so no file of
 # the pass keeps one: each is replaced by "<invite N>" once the pass is
-# over.
+# over. So is each piece of it of 12 characters or more: an input box
+# narrower than the invite shows it as windows that slide while it is
+# typed, and the frame of the join screen kept them (BR2, 2026-11-06).
 nodes_mask() {
-    local i file lines files
+    local lines
     mapfile -t lines < <(invites "$KC_OUT/$KC_PASS/${KC_NODES[0]%%$'\t'*}/console.log")
-    for i in "${!lines[@]}"; do
-        mapfile -t files < <(grep -rlF -- "${lines[$i]#KC_INVITE }" "$KC_OUT/$KC_PASS")
-        for file in "${files[@]}"; do
-            python3 -I -c 'import sys; p, v, n = sys.argv[1:]; t = open(p, "rb").read(); open(p, "wb").write(t.replace(v.encode(), ("<invite %s>" % n).encode()))' "$file" "${lines[$i]#KC_INVITE }" "$((i + 1))"
-        done
-    done
+    [ "${#lines[@]}" -gt 0 ] || return 0
+    printf '%s\n' "${lines[@]#KC_INVITE }" | python3 -I -c '
+import os, re, sys
+PIECE = 12
+invites = [line.rstrip("\n").encode() for line in sys.stdin if line.strip()]
+
+def masked(run, invite, mark):
+    """run with each longest piece of invite of PIECE bytes or more marked"""
+    grams = {invite[i:i + PIECE] for i in range(len(invite) - PIECE + 1)}
+    if not any(run[i:i + PIECE] in grams for i in range(len(run) - PIECE + 1)):
+        return run
+    out, i = b"", 0
+    while i < len(run):
+        end = next((j for j in range(len(run), i + PIECE - 1, -1) if run[i:j] in invite), 0)
+        out, i = (out + mark, end) if end else (out + run[i:i + 1], i + 1)
+    return out
+
+for top, _, names in os.walk(sys.argv[1]):
+    for name in names:
+        path = os.path.join(top, name)
+        with open(path, "rb") as handle:
+            text = old = handle.read()
+        for n, invite in enumerate(invites, 1):
+            mark = b"<invite %d>" % n
+            text = re.sub(rb"[A-Za-z0-9_.~+/=:-]{%d,}" % PIECE,
+                          lambda m: masked(m.group(0), invite, mark), text)
+        if text != old:
+            with open(path, "wb") as handle:
+                handle.write(text)
+' "$KC_OUT/$KC_PASS"
 }
 
 # node_run: one node from its creation to its checks, in its subshell.
