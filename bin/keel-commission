@@ -163,14 +163,22 @@ load_contract() {
 
 # questions_file FILE: one "ID<TAB>PROMPT<TAB>ANSWER<TAB>TYPE" line per
 # question, with the answers resolved; the answer of a choice is a Tcl
-# string body of its keys.
+# string body of its keys. A question that the node of a cloud mode answers
+# with the same id is left out: the node's keys replace it. The expect
+# script tries the questions first, so the Mode question of an app contract
+# (Simple, by Enter) took the Mode screen of a cloud node (keel-core,
+# 2026-11-06).
 questions_file() {
-    local rows row f answer
+    local rows row f answer own
     mapfile -t rows < <(grep $'^question\t' <<< "$KC_TSV")
+    own=$(grep $'^answer\t'"${KC_NODE:-}"$'\t' <<< "$KC_TSV" | cut -f3)
     : > "$1"
     chmod 0600 "$1"
     for row in "${rows[@]}"; do
         IFS=$'\t' read -r -a f <<< "$row"
+        if [ -n "${KC_NODE:-}" ] && grep -qxF -- "${f[1]}" <<< "$own"; then
+            continue
+        fi
         if [ "${f[5]}" = choice ]; then
             answer=$(printf '%s' "${f[4]}" | python3 -I "$KC_LIB/contract.py" keys tcl)
         else
