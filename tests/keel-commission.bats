@@ -222,6 +222,7 @@ EOF
     [[ $root =~ [A-Z] && $root =~ [a-z] && $root =~ [0-9] ]]
     [ -z "$(grep -rl "$root" "$OUT")" ]
     grep -q 'stty_init "rows 40 columns 120"' "$TMP/console.exp"
+    grep -qx 'fconfigure stdout -buffering line' "$TMP/console.exp"
     grep -q 'pct console 9001' "$TMP/console.exp"
     grep -q '80\]admin@example.invalid' "$TMP/console.exp"
     # the password menu gets Manual, never the Enter that takes Generate
