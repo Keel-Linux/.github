@@ -546,6 +546,52 @@ run_cloud() {
     [ "${lines[4]}" = '<invite 1>ab' ]
 }
 
+@test "webshot.py: the shot of a page with a text waits until the page shows it" {
+    # Webmin's dashboard on a VM of BR2 came later than the page stayed
+    # still: the after-login shot showed the menu only (2026-11-06). A shot
+    # whose text is given is taken once the page shows that text.
+    run python3 -I - "${CONTRACT_PY%/*}/webshot.py" "$TMP" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("webshot", sys.argv[1])
+webshot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(webshot)
+clock = [0.0]
+webshot.time.time = lambda: clock[0]
+def sleep(s):
+    clock[0] += s
+webshot.time.sleep = sleep
+class Fake:
+    wait = 30
+    def __init__(self):
+        self.asked = 0
+        self.shots = []
+    def open(self, url):
+        pass
+    def wait_for(self, selector):
+        return True
+    def login(self, *args):
+        pass
+    def status(self):
+        return 200
+    def evaluate(self, expression):
+        if "innerText.includes" in expression:
+            self.asked += 1
+            return self.asked >= 4
+        return False
+    def shot(self, path):
+        self.shots.append((path, self.asked))
+os.environ["KC_SECRET_root"] = "x"
+browser = Fake()
+browser.wait_text = webshot.Browser.wait_text.__get__(browser)
+fields = ("webmin", "https", "12321", "/", "", "#u", "root", "#p", "root", "#s", "0", "System hostname")
+webshot.take(browser, "fd00::1", sys.argv[2], 1, fields)
+print("asked before the after shot: %d" % browser.shots[-1][1])
+PY
+    echo "$output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"asked before the after shot: 4"* ]]
+}
+
 @test "webshot.py: a page is still until it asks for nothing more" {
     # Webmin's dashboard comes by requests after the document has loaded:
     # the after-login shot of a loaded host showed the menu and no
