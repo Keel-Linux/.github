@@ -218,6 +218,8 @@ EOF
     grep -q $'^sha256\t[0-9a-f]\{64\}$' "$OUT/lxc-interactive/meta"
     root=$(sed -n 's/.*KC_SEEN root_password.* 80\]\([^"]*\)\\r".*/\1/p' "$TMP/console.exp")
     [ "${#root}" -eq 24 ]
+    # three kinds of characters, as the password boxes of the first boot want
+    [[ $root =~ [A-Z] && $root =~ [a-z] && $root =~ [0-9] ]]
     [ -z "$(grep -rl "$root" "$OUT")" ]
     grep -q 'stty_init "rows 40 columns 120"' "$TMP/console.exp"
     grep -q 'pct console 9001' "$TMP/console.exp"

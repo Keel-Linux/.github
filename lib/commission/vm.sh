@@ -48,7 +48,7 @@ vm_create() {
     if [ "$firmware" = ovmf ]; then
         bios="--bios ovmf --machine q35 --efidisk0 $KC_VM_STORAGE:1,efitype=4m,pre-enrolled-keys=0"
     fi
-    pve "qm create $KC_VMID --name kc$KC_VMID --memory $(vm_value memory) --cores $(vm_value cores) --ostype l26 --scsihw virtio-scsi-single --virtio0 $KC_VM_STORAGE:$(vm_value disk) --ide2 '$1',media=cdrom --boot 'order=virtio0;ide2' --agent enabled=1 --vga std $bios $KC_VM_OPTS" || return 1
+    pve_retry "qm create $KC_VMID --name kc$KC_VMID --memory $(vm_value memory) --cores $(vm_value cores) --ostype l26 --scsihw virtio-scsi-single --virtio0 $KC_VM_STORAGE:$(vm_value disk) --ide2 '$1',media=cdrom --boot 'order=virtio0;ide2' --agent enabled=1 --vga std $bios $KC_VM_OPTS" || return 1
     pve "mkdir -p $KC_HOST_TMP/kc$KC_VMID && cat > $KC_HOST_TMP/kc$KC_VMID/ppm2png.py" < "$KC_LIB/ppm2png.py"
     pve "cat > $KC_HOST_TMP/kc$KC_VMID/qga.py" < "$KC_LIB/qga.py"
 }

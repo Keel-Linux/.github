@@ -95,7 +95,15 @@ declare -A KC_SECRETS
 # new_secret: 24 letters and digits, never a default and safe on a
 # terminal.
 new_secret() {
-    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24
+    local s=""
+    # a password box of the first boot wants three kinds of characters
+    # (password_problem of libinithooks): 24 letters and digits can come
+    # with no digit or no capital, and the box asks again for ever (BR2,
+    # 2026-11-06)
+    until [[ $s =~ [A-Z] && $s =~ [a-z] && $s =~ [0-9] ]]; do
+        s=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
+    done
+    printf '%s' "$s"
 }
 
 secret_value() {
