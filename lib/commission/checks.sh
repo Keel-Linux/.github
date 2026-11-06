@@ -123,9 +123,14 @@ check_mail() {
 }
 
 # check_not_deferred HOOK: in a preseeded pass no question is left for
-# keel-init.
+# keel-init. A deferred question is in the record of console_deferred
+# (lib/console.sh of inithooks), or the hook has a "not asked" line:
+# 35mysqlpass of lnmp writes one and no record. The one "not asked" line
+# that is no question left is keel_firstboot's for a step that has nothing
+# to ask, which says that the screen draws nothing: 75keel-role with
+# installation.mode described (BR1, 2026-11-06). Any other line fails.
 check_not_deferred() {
-    if in_guest "" "! grep -q '\\[$1\\] not asked' /var/log/inithooks.log"; then
+    if in_guest "" "! grep -qsxF '$1' /var/lib/inithooks/deferred && ! grep -a '\\[$1\\] not asked' /var/log/inithooks.log | grep -qv 'draws nothing\$'"; then
         record pass "preseed.answered.$1" "the description answered it"
     else
         record fail "preseed.answered.$1" "deferred to keel-init although the description answers it"
