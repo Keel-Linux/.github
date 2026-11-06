@@ -801,7 +801,7 @@ PY2
     cat > "$GBIN/keel" <<'EOF'
 #!/bin/bash
 case "$1" in
-    seed) echo kc9001-boot-row ;;
+    seed) printf 'kc9001-boot-row\nsecond line\n' ;;
     node) echo "kc$KC_FAKE_VMID" ;;
     none) exit 0 ;;
     *) cat "$STATE/keel.$KC_FAKE_VMID" 2>/dev/null ;;
