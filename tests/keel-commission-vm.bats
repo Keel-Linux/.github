@@ -484,7 +484,9 @@ run_cloud() {
     printf '#!/bin/bash\nprintf "pve2 %%s\\n" "$*" >> "$LOG"\nexec bash -c "$*"\n' > "$FAKES/pve2"
     chmod +x "$FAKES/pve2"
     export KC_PVE_BR2="$FAKES/pve2" KC_BOOT_TIMEOUT=30
-    printf 'KC_HINT\nKC_SEEN mode\nInvite a node\nKC_INVITE keel1:SECRETTOKEN\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    # the bytes of a screen, as the raw console of a real node holds them:
+    # grep without -a reads such a log as binary and prints no line
+    printf '\033[2J\000\001\nKC_HINT\nKC_SEEN mode\nInvite a node\nKC_INVITE keel1:SECRETTOKEN\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
     printf 'KC_HINT\nkeel1:SECRETTOKEN pasted\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
     printf 'vip fd00::ffff:1: holder\n3 voter(s)\n' > "$STATE/keel.9001"
     printf 'vip fd00::ffff:1: follower\n' > "$STATE/keel.9002"
