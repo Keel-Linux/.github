@@ -546,6 +546,40 @@ run_cloud() {
     [ "${lines[4]}" = '<invite 1>ab' ]
 }
 
+@test "webshot.py: a page is still until it asks for nothing more" {
+    # Webmin's dashboard comes by requests after the document has loaded:
+    # the after-login shot of a loaded host showed the menu and no
+    # dashboard (web, BR1 lxc-preseed, and core, BR2 vm-iso, 2026-11-06)
+    run python3 -I - "${CONTRACT_PY%/*}/webshot.py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("webshot", sys.argv[1])
+webshot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(webshot)
+clock = [0.0]
+webshot.time.time = lambda: clock[0]
+def sleep(s):
+    clock[0] += s
+webshot.time.sleep = sleep
+browser = webshot.Browser.__new__(webshot.Browser)
+browser.wait = 30
+counts = iter([3, 5, 9, 12, 12, 12, 12, 12])
+asked = []
+def evaluate(expression):
+    asked.append(expression)
+    if "readyState" in expression:
+        return "complete"
+    return next(counts)
+browser.evaluate = evaluate
+browser.settle()
+print("requests asked %d" % sum("resource" in a for a in asked))
+print("clock %.1f" % clock[0])
+PY
+    echo "$output"
+    [ "$status" -eq 0 ]
+    # it asked until the count stayed the same twice, and no more
+    [[ "$output" == *"requests asked 6"* ]]
+}
+
 @test "cloud: a node's answer replaces the question of the same id" {
     # an app contract asks the Mode screen as a question, Simple by Enter, for
     # its single node passes; the node of a cloud mode answers the same

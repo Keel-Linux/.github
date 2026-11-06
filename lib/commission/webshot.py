@@ -183,13 +183,24 @@ class Browser:
         return result.get("result", {}).get("value")
 
     def settle(self):
-        """Wait until the page has loaded and stayed still for a second"""
+        """Wait until the page has loaded, then until it asks for nothing
+        more: the count of its requests stays the same for two seconds.
+        Webmin's dashboard comes by requests after the document has loaded,
+        and the after-login shot of a loaded host showed the menu and no
+        dashboard (BR1 and BR2, 2026-11-06)."""
         deadline = time.time() + self.wait
         while time.time() < deadline:
             if self.evaluate("document.readyState") == "complete":
                 break
             time.sleep(0.5)
-        time.sleep(1.5)
+        last, still = None, 0
+        while time.time() < deadline and still < 2:
+            count = self.evaluate("performance.getEntriesByType('resource').length")
+            still = still + 1 if count == last else 0
+            last = count
+            if still < 2:
+                time.sleep(1)
+        time.sleep(0.5)
 
     def open(self, url):
         result = self.call("Page.navigate", url=url)
