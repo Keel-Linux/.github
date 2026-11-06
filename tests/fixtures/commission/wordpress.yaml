@@ -108,14 +108,21 @@ cloud:
     invite: 'keel[12]:[A-Za-z0-9_.~+/=-]+'
     # the label anchors it: the usage screen shows the node's own addresses too
     vip: 'VIP:? +([0-9a-f]{1,4}(:[0-9a-f]{0,4}){2,7})'
+  # the screens on which a node waits for another: no key while they are up
+  waits: [Waiting for the nodes]
+  # the proofs across the pair, in order (keel 0.23.83 words: "carried
+  # here: yes" on the node that holds the VIP; Syncthing folder types)
   checks:
-    - {id: vip-holder, at: all, run: 'keel vip status', match: 'holder', count: 1}
-    - {id: row-through-vip, at: replica, secret: db, run: 'MYSQL_PWD="$SECRET" mysql -h "$VIP" -u wordpress -N -e "SELECT 1"'}
-    - {id: files-follow, at: replica, run: 'keel vip status', match: 'files: from '}
+    - {id: vip-holder, at: all, run: 'keel vip status', match: 'carried here: yes', count: 1}
+    - {id: row-written, at: primary, run: 'mysql -e "CREATE DATABASE IF NOT EXISTS kc_probe; CREATE TABLE IF NOT EXISTS kc_probe.t (v INT); INSERT INTO kc_probe.t VALUES (42)"'}
+    - {id: row-replicated, at: replica, run: 'sleep 5; mysql -N -e "SELECT v FROM kc_probe.t"', match: '^42$'}
+    - {id: files-follow, at: replica, run: 'k=$(cat /var/lib/keel/filesync/apikey); curl -s -H "X-API-Key: $k" http://127.0.0.1:8384/rest/config/folders', match: 'receiveonly'}
+    - {id: files-sent, at: primary, run: 'k=$(cat /var/lib/keel/filesync/apikey); curl -s -H "X-API-Key: $k" http://127.0.0.1:8384/rest/config/folders', match: 'sendonly'}
     - {id: promote, at: replica, run: 'keel vip promote'}
-    - {id: promoted-holder, at: replica, run: 'keel vip status', match: 'holder'}
+    - {id: promoted-holder, at: replica, run: 'keel vip status', match: 'carried here: yes'}
     - {id: return, at: primary, run: 'keel vip promote'}
-    - {id: returned-holder, at: primary, run: 'keel vip status', match: 'holder'}
+    - {id: returned-holder, at: primary, run: 'keel vip status', match: 'carried here: yes'}
+    - {id: probe-dropped, at: primary, run: 'mysql -e "DROP DATABASE kc_probe"'}
 nodes:
   - name: primary
     site: br1

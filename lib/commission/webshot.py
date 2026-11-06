@@ -13,7 +13,8 @@ put in brackets). Each page is opened at SCHEME://HOST:PORT/PATH in a
 window of 1280x800 and written to OUTDIR/web-NN-NAME.png, NN counted from
 FIRST, WAIT seconds after it has loaded. A shot with a login fills USER_FIELD and PASS_FIELD (CSS selectors),
 clicks SUBMIT, and writes a second screenshot, web-NN-NAME-after.png, of
-AFTER (or of the page the login went to). The password is the value of the
+AFTER (or of the page the login went to). That page must answer with an
+HTTP status below 400 and must not show PASS_FIELD again. The password is the value of the
 environment variable KC_SECRET_SECRET: it goes to the browser over the
 DevTools socket only, and never to a file, an argument or stdout.
 
@@ -46,6 +47,12 @@ import time
 import urllib.parse
 import urllib.request
 
+# The user agent of a desktop Chrome. Headless Chromium names itself
+# HeadlessChrome, and Anubis, in front of a cloud node, denies that name
+# (BR1 and BR2, 2026-11-06): the operator's browser is what the gallery
+# shows, so the shots ask as one.
+USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko)"
+              " Chrome/140.0.0.0 Safari/537.36")
 WIDTH, HEIGHT = 1280, 800
 
 
@@ -118,6 +125,7 @@ class Browser:
                 "--no-default-browser-check", "--ignore-certificate-errors",
                 "--hide-scrollbars", "--window-size=%d,%d" % (WIDTH, HEIGHT),
                 "--remote-debugging-port=0",
+                "--user-agent=" + USER_AGENT,
                 "--user-data-dir=" + self.profile]
         if proxy:
             args.append("--proxy-server=" + proxy)
@@ -187,6 +195,19 @@ class Browser:
             raise OSError("%s: %s" % (url, result["errorText"]))
         self.settle()
 
+    def wait_for(self, selector):
+        """Wait up to the browser's wait for SELECTOR on the page. A cloud
+        node puts Anubis in front: its challenge page comes first, and the
+        login form only once the browser has solved it (BR1 and BR2,
+        2026-11-06). True when it came."""
+        deadline = time.time() + self.wait
+        probe = "document.querySelector(%s) !== null" % json.dumps(selector)
+        while time.time() < deadline:
+            if self.evaluate(probe):
+                return True
+            time.sleep(0.5)
+        return False
+
     def login(self, user_field, user, pass_field, password, submit):
         fill = ("(function(s, v){var e=document.querySelector(s); if(!e) return false;"
                 " e.focus(); e.value=v; e.dispatchEvent(new Event('input',{bubbles:true}));"
@@ -201,6 +222,11 @@ class Browser:
             raise OSError("no button %s on the page" % submit)
         time.sleep(1)
         self.settle()
+
+    def status(self):
+        """The HTTP status of the page's document, 0 when it is not known"""
+        return int(self.evaluate(
+            "(performance.getEntriesByType('navigation')[0] || {}).responseStatus || 0") or 0)
 
     def shot(self, path):
         data = self.call("Page.captureScreenshot", format="png")["data"]
@@ -226,6 +252,8 @@ def take(browser, host, outdir, number, fields):
     lines = []
     first = "web-%02d-%s.png" % (number, name)
     browser.open(url_of(host, scheme, port, path))
+    if user_field:
+        browser.wait_for(user_field)
     time.sleep(wait)
     browser.shot(os.path.join(outdir, first))
     if not user_field:
@@ -244,6 +272,16 @@ def take(browser, host, outdir, number, fields):
     browser.shot(os.path.join(outdir, second))
     lines.append("%02d\tweb-%s-after\t%s\tafter the login: %s"
                  % (number, name, second, after or "the page the login opened"))
+    # the shot is written, as evidence, before the page is judged: a login
+    # that Coraza refused was a 403 page, and the run passed with it (BR1
+    # and BR2, 2026-11-06)
+    status = browser.status()
+    if status >= 400:
+        raise OSError("after the login: %s answered HTTP %d"
+                      % (after or "the page the login opened", status))
+    if browser.evaluate("document.querySelector(%s) !== null" % json.dumps(pass_field)):
+        raise OSError("after the login: the password field %s is still on the page"
+                      % pass_field)
     return lines
 
 

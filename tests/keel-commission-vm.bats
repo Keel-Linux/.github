@@ -127,6 +127,7 @@ screenshots:
   - {name: two, url: /}
 cloud:
   capture: {invite: '(', other: x, vip: "a\tb"}
+  waits: ['a{b}']
   checks:
     - not a mapping
     - {id: Bad, at: '!', run: "", match: '(', count: -1, secret: nope}
@@ -146,7 +147,7 @@ EOF
         "url 'x' is not a path" "after 'y z' is not a path" "wait -1 is not 0 to 120" "login is not a mapping" \
         "login.password_field" "login.submit '' is missing" "login.secret 'nope'" "screenshot name 'two'" \
         "cloud.capture.invite: missing )" "cloud.capture.other is not invite or vip" \
-        "cloud.capture.vip has a tab" "a cloud check is not a mapping" "cloud check id 'Bad'" \
+        "cloud.capture.vip has a tab" "cloud.waits: 'a{b}' is not a prompt" "a cloud check is not a mapping" "cloud check id 'Bad'" \
         "run is empty" "at '!' is not a role" "match: missing )" "count -1 is not a number" \
         "secret 'nope' is not declared" "a node is not a mapping" "node name 'Bad'" "site 'B1'" \
         "kind 'box'" "mode 'cloudy'" "role 'king'" "image 'no volid'" "answers is not a list" \
@@ -164,9 +165,10 @@ EOF
     for want in "vm is not a mapping" "screenshots is not a list" "cloud is not a mapping" "nodes is not a list"; do
         [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
     done
-    printf 'contract: 1\nappliance: x\nsecrets: [root]\nquestions: [{id: r, hook: 30rootpass, prompt: R, answer: "secret:root"}]\nproofs: [{secret: root, kind: shadow, user: root}]\nvm: {installer: []}\ncloud: {capture: [1], checks: {}}\n' > "$TMP/c.yaml"
+    printf 'contract: 1\nappliance: x\nsecrets: [root]\nquestions: [{id: r, hook: 30rootpass, prompt: R, answer: "secret:root"}]\nproofs: [{secret: root, kind: shadow, user: root}]\nvm: {installer: []}\ncloud: {capture: [1], checks: {}, waits: x}\n' > "$TMP/c.yaml"
     run "$KC" --check "$TMP/c.yaml"
     [ "$status" -eq 2 ]
+    [[ "$output" == *"cloud.waits is not a list"* ]]
     [[ "$output" == *"vm.installer is not a list of screens"* ]]
     [[ "$output" == *"cloud.capture is not a mapping"* ]]
     [[ "$output" == *"cloud.checks is not a list"* ]]
@@ -435,7 +437,7 @@ EOF
     grep -qx $'02\temail\tscreens/02-email.txt\tadmin@example.invalid' "$OUT/lxc-interactive/screens.tsv"
     # a choice gets its keys and nothing else once the screen is still: no
     # emptied field, no Enter
-    grep -qF -- '-ex {Is your email correct} { step; set launched 1; settle; puts "\nKC_SEEN ok"; send -- "y"; exp_continue }' "$TMP/console.exp"
+    grep -qF -- '-ex {Is your email correct} { step; set launched 1; settle; sleep 1; puts "\nKC_SEEN ok"; choose "y"; exp_continue }' "$TMP/console.exp"
 }
 
 # ---- the cloud modes -------------------------------------------------------
@@ -448,6 +450,7 @@ cloud:
   capture:
     invite: 'keel1:[A-Za-z0-9_-]+'
     vip: 'VIP (fd00:[0-9a-f:]+)'
+  waits: [Waiting for the nodes]
   checks:
     - {id: holder, at: all, run: 'keel vip status', match: holder, count: 1}
     - {id: row, at: replica, run: 'keel row "$VIP" "$SECRET"', secret: db}
@@ -481,7 +484,9 @@ run_cloud() {
     printf '#!/bin/bash\nprintf "pve2 %%s\\n" "$*" >> "$LOG"\nexec bash -c "$*"\n' > "$FAKES/pve2"
     chmod +x "$FAKES/pve2"
     export KC_PVE_BR2="$FAKES/pve2" KC_BOOT_TIMEOUT=30
-    printf 'KC_HINT\nKC_SEEN mode\nInvite a node\nKC_INVITE keel1:SECRETTOKEN\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    # the bytes of a screen, as the raw console of a real node holds them:
+    # grep without -a reads such a log as binary and prints no line
+    printf '\033[2J\000\001\nKC_HINT\nKC_SEEN mode\nInvite a node\nKC_INVITE keel1:SECRETTOKEN\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
     printf 'KC_HINT\nkeel1:SECRETTOKEN pasted\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
     printf 'vip fd00::ffff:1: holder\n3 voter(s)\n' > "$STATE/keel.9001"
     printf 'vip fd00::ffff:1: follower\n' > "$STATE/keel.9002"
@@ -494,11 +499,21 @@ run_cloud() {
         [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
     done
     # node two got the invite and the VIP of node one's screen, as keys
-    grep -qF 'send -- "keel1:SECRETTOKEN\r"' "$TMP/console.9002.exp"
-    grep -qF 'send -- "fd00::ffff:1\r"' "$TMP/console.9002.exp"
-    grep -qF 'send -- "\033\[B\r"' "$TMP/console.9001.exp"
-    grep -qF -- '-re {keel1:[A-Za-z0-9_-]+} { puts "\nKC_INVITE $expect_out(0,string)"; exp_continue }' "$TMP/console.9001.exp"
-    grep -qF -- '-re {VIP (fd00:[0-9a-f:]+)} { puts "\nKC_VIP $expect_out(1,string)"; exp_continue }' "$TMP/console.9001.exp"
+    grep -qF 'choose "keel1:SECRETTOKEN\r"' "$TMP/console.9002.exp"
+    grep -qF 'choose "fd00::ffff:1\r"' "$TMP/console.9002.exp"
+    grep -qF 'choose "\033\[B\r"' "$TMP/console.9001.exp"
+    grep -qF -- '-re {keel1:[A-Za-z0-9_-]+} { puts "\nKC_INVITE $expect_out(0,string)"; answered_in $expect_out(buffer); exp_continue }' "$TMP/console.9001.exp"
+    # the screen whose title a capture takes gets its answer there, once
+    grep -qF 'set node_answers [list "mode"' "$TMP/console.9001.exp"
+    grep -qF 'proc answered_in {text}' "$TMP/console.9001.exp"
+    # a choice sends its keys, waits for the menu to draw them, then Enter
+    grep -qF 'proc choose {keys}' "$TMP/console.9001.exp"
+    grep -qF 'expect -timeout 5 -re {.+} { set drawn 1 }' "$TMP/console.9001.exp"
+    grep -qF 'choose $ak } }' "$TMP/console.9001.exp"
+    # on a screen that waits for the other node, no key and no step
+    grep -qF -- '-ex {Waiting for the nodes} { set waiting 1; exp_continue }' "$TMP/console.9001.exp"
+    grep -qF -- 'timeout { if {$waiting} { set waiting 0; incr waited; if {$waited > 3600} { puts "\nKC_STUCK"; exit 0 }; exp_continue }; step;' "$TMP/console.9001.exp"
+    grep -qF -- '-re {VIP (fd00:[0-9a-f:]+)} { puts "\nKC_VIP $expect_out(1,string)"; answered_in $expect_out(buffer); exp_continue }' "$TMP/console.9001.exp"
     # each site's own PVE host, the vmids one after the other
     grep -q '^pve2 pct create 9002 ' "$LOG"
     grep -q '^pve pct create 9001 ' "$LOG"
@@ -566,7 +581,8 @@ run_cloud() {
     python3 -I "$BATS_TEST_DIRNAME/fixtures/commission/loginsrv.py" "$port" &
     server=$!
     sleep 1
-    printf 'shot\tapp\thttp\t%s\t/\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\nshot\tfront\thttp\t%s\t/x\t\t\t\t\t\t\t0\nshot\tbad\thttp\t%s\t/\t\t#nofield\tadmin\t#p\tapp\t#go\t0\n' \
+    # app: the login form comes after a challenge page, as behind Anubis
+    printf 'shot\tapp\thttp\t%s\t/challenge\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\nshot\tfront\thttp\t%s\t/x\t\t\t\t\t\t\t0\nshot\tbad\thttp\t%s\t/\t\t#nofield\tadmin\t#p\tapp\t#go\t0\n' \
         "$port" "$port" "$port" > "$TMP/shots"
     KC_SECRET_app=s3cret run python3 -I "$LIB/webshot.py" 127.0.0.1 "$TMP/w" 1 < "$TMP/shots"
     kill "$server"
@@ -576,4 +592,24 @@ run_cloud() {
     [[ "$output" == *"webshot: bad: no field #nofield on the page"* ]]
     [[ "$output" != *s3cret* ]]
     [ "$(head -c 8 "$TMP/w/web-01-app-after.png" | od -An -tx1 | tr -d ' \n')" = 89504e470d0a1a0a ]
+}
+
+@test "webshot: a login that ends on an error page, or on its form again, fails" {
+    command -v chromium >/dev/null || skip "no chromium on this host"
+    port=$((20000 + RANDOM % 20000))
+    python3 -I "$BATS_TEST_DIRNAME/fixtures/commission/loginsrv.py" "$port" &
+    server=$!
+    sleep 1
+    # wrong: a wrong password, and /admin answers 403, as Coraza did
+    # again: no after page, and the login shows its form again
+    printf 'shot\twrong\thttp\t%s\t/\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\nshot\tagain\thttp\t%s\t/stay\t\t#u\tadmin\t#p\tapp\t#go\t0\n' \
+        "$port" "$port" > "$TMP/shots"
+    KC_SECRET_app=wrong run python3 -I "$LIB/webshot.py" 127.0.0.1 "$TMP/w" 1 < "$TMP/shots"
+    kill "$server"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"webshot: wrong: after the login: /admin answered HTTP 403"* ]]
+    [[ "$output" == *"webshot: again: after the login: the password field #p is still on the page"* ]]
+    # the shots are still written, as evidence
+    [ -s "$TMP/w/web-01-wrong-after.png" ]
+    [ -s "$TMP/w/web-02-again-after.png" ]
 }
