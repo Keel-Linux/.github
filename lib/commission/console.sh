@@ -32,6 +32,11 @@
 console_script() {
     local fmt what regex captures
     printf 'set timeout %s\n' "$KC_CONSOLE_TIMEOUT"
+    # a line at a time: expect writes into the pipe of ssh, and Tcl keeps a
+    # pipe's output until it exits, so the invite of the first node reached
+    # the next node only when the first node gave up waiting for it (BR1,
+    # 2026-11-06)
+    printf 'fconfigure stdout -buffering line\n'
     printf 'set stty_init "rows 40 columns 120"\n'
     printf 'set launched 0\nset steps 0\n'
     # every screen counts, so no loop between screens runs for ever
