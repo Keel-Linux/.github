@@ -32,6 +32,11 @@ setup() {
     cat > "$FAKES/pve" <<'EOF'
 #!/bin/bash
 printf 'pve %s\n' "$*" >> "$LOG"
+# the probe of web_address: an address in STATE/reachable answers
+if [[ "$*" == kc_probe=1* ]]; then
+    for a in $(cat "$STATE/reachable" 2>/dev/null); do [[ "$*" == *"'$a'"* ]] && exit 0; done
+    exit 1
+fi
 [ -e "$STATE/no-expect" ] && [ "$*" = "command -v expect" ] && exit 1
 exec bash -c "$*"
 EOF

@@ -9,13 +9,31 @@
 
 KC_WEBSHOT="${KC_WEBSHOT:-python3 -I $KC_LIB/webshot.py}"
 
-# web_address: the address of the machine: its first stable global IPv6
-# address, else its first global IPv4 one. IPv6 first: on BR1 the PVE host
-# reaches a guest on its VLAN by IPv6 only (2026-11-05).
-web_address() {
+# web_addresses: the addresses of the machine, its stable global IPv6 ones
+# first, then its global IPv4 ones, one a line.
+web_addresses() {
     printf '%s\n' "ip -o -6 addr show scope global | grep -v temporary | awk '{ sub(\"/.*\", \"\", \$4); print \$4 }'" \
         "ip -o -4 addr show scope global | awk '{ sub(\"/.*\", \"\", \$4); print \$4 }'" \
-        | guest_sh 2>/dev/null | head -1
+        | guest_sh 2>/dev/null
+}
+
+# web_address PORT: the first address of the machine that the PVE host
+# reaches on PORT, else the first address. The sites differ: on BR1 the
+# PVE host reaches a guest on its VLAN by IPv6 only, on BR2 by IPv4 only
+# (2026-11-05 and 2026-11-06), and the tunnel goes through the PVE host.
+web_address() {
+    local addr first="" addrs
+    addrs=$(web_addresses)
+    while read -r addr; do
+        [ -n "$addr" ] || continue
+        [ -n "$first" ] || first=$addr
+        # kc-probe names the probe for the tests' PVE host
+        if pve "kc_probe=1 timeout 5 bash -c '</dev/tcp/\$0/\$1' '$addr' '$1'" </dev/null >/dev/null 2>&1; then
+            echo "$addr"
+            return 0
+        fi
+    done <<< "$addrs"
+    [ -z "$first" ] || echo "$first"
 }
 
 # web_tunnel PORT: a SOCKS proxy on 127.0.0.1:PORT through the PVE host,
@@ -37,13 +55,20 @@ web_tunnel() {
     echo "$pid"
 }
 
+# web_first_port ROWS: the port of the first screenshot, 443 unless named
+web_first_port() {
+    local port
+    port=$(head -1 <<< "$1" | cut -f4)
+    echo "${port:-443}"
+}
+
 # web_shots: take the screenshots of the contract and add them to the
 # guide. The password of a login goes to the browser from the environment
 # (KC_SECRET_NAME): no file and no command line has it.
 web_shots() {
     local rows addr port pid rc=0
     rows=$(grep $'^shot\t' <<< "$KC_TSV") || return 0
-    addr=$(web_address)
+    addr=$(web_address "$(web_first_port "$rows")")
     if [ -z "$addr" ]; then
         record fail web.screenshots "the machine has no global address"
         return 0

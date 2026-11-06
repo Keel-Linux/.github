@@ -410,6 +410,12 @@ EOF
     run_pass lxc-interactive
     [[ "$output" == *"fail  web.screenshots                          no page at /wp-admin/"* ]]
     grep -q 'webshot fd00::5 ' "$LOG"
+    # the address the PVE host reaches is taken, IPv4 here (BR2, 2026-11-06)
+    printf '10.0.0.5\n' > "$STATE/reachable"
+    rm -f "$STATE/exists" "$STATE/web-fails"
+    run_pass lxc-interactive
+    [[ "$output" == *"pass  web.screenshots                          1 pages of 10.0.0.5"* ]]
+    grep -q "kc_probe=1 timeout 5 .* 'fd00::5' '443'" "$LOG"
     touch "$STATE/no-tunnel"
     rm -f "$STATE/exists"
     run_pass lxc-interactive

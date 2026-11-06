@@ -12,6 +12,19 @@ pve() {
     $KC_PVE "$@"
 }
 
+# pve_retry COMMAND: COMMAND on the PVE host, up to three times. Machines
+# made at the same time on one storage wait for its lock, and pct or qm
+# gives up with "can't lock file" (BR2, 2026-11-06, three at once on
+# local-zfs).
+pve_retry() {
+    local try
+    for try in 1 2 3; do
+        pve "$1" && return 0
+        [ "$try" = 3 ] || sleep "$KC_POLL"
+    done
+    return 1
+}
+
 # guest_sh: run the script on stdin inside the machine, as root. A secret
 # that a check needs goes in the script, so it never is on a command line.
 guest_sh() {
@@ -39,7 +52,7 @@ template_sha() {
 # secret, and the root proof checks the root secret. KC_CT_OPTS adds the
 # site's storage and network options.
 ct_create() {
-    pve "pct create $KC_VMID '$1' --hostname kc$KC_VMID --unprivileged 1 --features nesting=1 --password '$KC_LOGIN_SECRET' $KC_CT_OPTS"
+    pve_retry "pct create $KC_VMID '$1' --hostname kc$KC_VMID --unprivileged 1 --features nesting=1 --password '$KC_LOGIN_SECRET' $KC_CT_OPTS"
 }
 
 ct_start() {
