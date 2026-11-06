@@ -418,6 +418,13 @@ EOF
     run_pass lxc-interactive
     [[ "$output" == *"pass  web.screenshots                          1 pages of 10.0.0.5"* ]]
     grep -q "kc_probe=1 timeout 5 .* 'fd00::5' '443'" "$LOG"
+    # a round in which no probe reaches is tried again: on BR2 every probe
+    # failed once and the shots went to an address the host does not reach
+    # (keel-lnpp and keel-postgresql lxc-preseed, 2026-11-06)
+    printf '2\n' > "$STATE/probe-fails"
+    rm -f "$STATE/exists"
+    run_pass lxc-interactive
+    [[ "$output" == *"pass  web.screenshots                          1 pages of 10.0.0.5"* ]]
     touch "$STATE/no-tunnel"
     rm -f "$STATE/exists"
     run_pass lxc-interactive
