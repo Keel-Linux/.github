@@ -24,7 +24,7 @@ setup() {
     : > "$LOG"
     export TMP FAKES GUEST GBIN STATE OUT LOG
     export KC_PVE="$FAKES/pve" KC_POLL=1 KC_BOOT_TIMEOUT=2 KC_MAIL_WAIT=0
-    export KC_CONSOLE_TIMEOUT=1 KC_CONSOLE_STEPS=3
+    export KC_CONSOLE_TIMEOUT=1 KC_CONSOLE_STEPS=3 KC_WEB_PROBE_PAUSE=0
     PATH="$FAKES:$PATH"
     export PATH
 
@@ -34,6 +34,10 @@ setup() {
 printf 'pve %s\n' "$*" >> "$LOG"
 # the probe of web_address: an address in STATE/reachable answers
 if [[ "$*" == kc_probe=1* ]]; then
+    # STATE/probe-fails: that many probes fail first, as when the PVE host
+    # drops the connection
+    left=$(cat "$STATE/probe-fails" 2>/dev/null || echo 0)
+    if [ "$left" -gt 0 ]; then echo $((left - 1)) > "$STATE/probe-fails"; exit 255; fi
     for a in $(cat "$STATE/reachable" 2>/dev/null); do [[ "$*" == *"'$a'"* ]] && exit 0; done
     exit 1
 fi

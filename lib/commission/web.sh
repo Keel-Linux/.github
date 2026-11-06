@@ -22,17 +22,24 @@ web_addresses() {
 # PVE host reaches a guest on its VLAN by IPv6 only, on BR2 by IPv4 only
 # (2026-11-05 and 2026-11-06), and the tunnel goes through the PVE host.
 web_address() {
-    local addr first="" addrs
+    local addr first="" addrs round
     addrs=$(web_addresses)
-    while read -r addr; do
-        [ -n "$addr" ] || continue
-        [ -n "$first" ] || first=$addr
-        # kc-probe names the probe for the tests' PVE host
-        if pve "kc_probe=1 timeout 5 bash -c '</dev/tcp/\$0/\$1' '$addr' '$1'" </dev/null >/dev/null 2>&1; then
-            echo "$addr"
-            return 0
-        fi
-    done <<< "$addrs"
+    # A round in which no address answers is tried again, twice: on BR2
+    # every probe failed once, the shots went to an IPv6 address the PVE
+    # host does not reach, and minutes later the same probe reached the
+    # IPv4 address (keel-lnpp and keel-postgresql lxc-preseed, 2026-11-06)
+    for round in 1 2 3; do
+        while read -r addr; do
+            [ -n "$addr" ] || continue
+            [ -n "$first" ] || first=$addr
+            # kc-probe names the probe for the tests' PVE host
+            if pve "kc_probe=1 timeout 5 bash -c '</dev/tcp/\$0/\$1' '$addr' '$1'" </dev/null >/dev/null 2>&1; then
+                echo "$addr"
+                return 0
+            fi
+        done <<< "$addrs"
+        [ "$round" -eq 3 ] || sleep "${KC_WEB_PROBE_PAUSE:-5}"
+    done
     [ -z "$first" ] || echo "$first"
 }
 
