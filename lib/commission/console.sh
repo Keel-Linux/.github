@@ -82,9 +82,11 @@ console_script() {
     # a screen of the node and a choice of keel-init get their keys once the
     # screen stays still: a title is drawn before its menu, and keys sent on
     # the title were lost, so the Mode screen of a cloud node chose nothing
-    # (BR1, 2026-11-06). Then they get their keys as they
+    # (BR1, 2026-11-06), and a second more, for a menu drawn before it reads
+    # the keyboard: its Enter took the default (BR2, 2026-11-06). Then they
+    # get their keys as they
     # are: no field to empty and no Enter after them
-    awk -F'\t' 'FILENAME != ARGV[1] || $4 == "choice" { printf "    -ex {%s} { step; set launched 1; settle; puts \"\\nKC_SEEN %s\"; send -- \"%s\"; exp_continue }\n", $2, $1, $3 }' \
+    awk -F'\t' 'FILENAME != ARGV[1] || $4 == "choice" { printf "    -ex {%s} { step; set launched 1; settle; sleep 1; puts \"\\nKC_SEEN %s\"; send -- \"%s\"; exp_continue }\n", $2, $1, $3 }' \
         "$1" "${2:-/dev/null}"
     # confconsole is no question: a login that opens it and not keel-init
     # is recorded, and it is left as an operator leaves it, by its Advanced

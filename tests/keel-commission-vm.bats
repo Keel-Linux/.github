@@ -437,7 +437,7 @@ EOF
     grep -qx $'02\temail\tscreens/02-email.txt\tadmin@example.invalid' "$OUT/lxc-interactive/screens.tsv"
     # a choice gets its keys and nothing else once the screen is still: no
     # emptied field, no Enter
-    grep -qF -- '-ex {Is your email correct} { step; set launched 1; settle; puts "\nKC_SEEN ok"; send -- "y"; exp_continue }' "$TMP/console.exp"
+    grep -qF -- '-ex {Is your email correct} { step; set launched 1; settle; sleep 1; puts "\nKC_SEEN ok"; send -- "y"; exp_continue }' "$TMP/console.exp"
 }
 
 # ---- the cloud modes -------------------------------------------------------
