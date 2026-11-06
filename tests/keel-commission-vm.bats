@@ -505,7 +505,7 @@ run_cloud() {
     grep -qF -- '-re {keel1:[A-Za-z0-9_-]+} { puts "\nKC_INVITE $expect_out(0,string)"; exp_continue }' "$TMP/console.9001.exp"
     # on a screen that waits for the other node, no key and no step
     grep -qF -- '-ex {Waiting for the nodes} { set waiting 1; exp_continue }' "$TMP/console.9001.exp"
-    grep -qF -- 'timeout { if {$waiting} { incr waited; if {$waited > 3600} { puts "\nKC_STUCK"; exit 0 }; exp_continue }; step;' "$TMP/console.9001.exp"
+    grep -qF -- 'timeout { if {$waiting} { set waiting 0; incr waited; if {$waited > 3600} { puts "\nKC_STUCK"; exit 0 }; exp_continue }; step;' "$TMP/console.9001.exp"
     grep -qF -- '-re {VIP (fd00:[0-9a-f:]+)} { puts "\nKC_VIP $expect_out(1,string)"; exp_continue }' "$TMP/console.9001.exp"
     # each site's own PVE host, the vmids one after the other
     grep -q '^pve2 pct create 9002 ' "$LOG"

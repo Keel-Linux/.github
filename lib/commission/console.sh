@@ -68,7 +68,10 @@ console_script() {
     # A screen that waits for another node (the contract's cloud.waits):
     # while it is up no key is sent and no step is counted, for up to
     # KC_NODE_WAIT seconds. Enter on it chose its Back button and the first
-    # node never saw the second join (BR1, 2026-11-06). Any answer ends it.
+    # node never saw the second join (BR1, 2026-11-06). The screen draws
+    # itself again every few seconds; a timeout with no new drawing of it
+    # ends the wait, so the screen after it gets its Enter again, and so
+    # does any answer.
     mapfile -t waits < <(grep $'^wait\t' <<< "$KC_TSV" | cut -f2)
     for regex in "${waits[@]}"; do
         printf '    -ex {%s} { set waiting 1; exp_continue }\n' "$regex"
@@ -117,7 +120,7 @@ console_script() {
     # exit logs out to the login prompt of tty1; Ctrl-a q leaves pct console
     printf '        puts "\\nKC_DONE"; send -- "exit\\r"; sleep 1; send -- "\\001q"; expect eof\n'
     printf '    }\n'
-    printf '    timeout { if {$waiting} { incr waited; if {$waited > %s} { puts "\\nKC_STUCK"; exit 0 }; exp_continue }; step; send -- "\\r"; exp_continue }\n' \
+    printf '    timeout { if {$waiting} { set waiting 0; incr waited; if {$waited > %s} { puts "\\nKC_STUCK"; exit 0 }; exp_continue }; step; send -- "\\r"; exp_continue }\n' \
         "$((KC_NODE_WAIT / KC_CONSOLE_TIMEOUT))"
     printf '    eof { puts "\\nKC_EOF" }\n'
     printf '}\n'
