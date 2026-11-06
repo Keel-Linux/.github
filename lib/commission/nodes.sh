@@ -243,7 +243,9 @@ cross_checks() {
 }
 
 # cross_same ID AT RUN: pass when RUN prints the same output, not empty, on
-# every node AT names.
+# every node AT names. Whole outputs are compared, by their digests: two
+# equal outputs of two lines were counted as two values (LNPP, BR1 and BR2,
+# 2026-11-06).
 cross_same() {
     local i out outs=() failed=0
     for i in $(on_nodes "$2"); do
@@ -255,10 +257,10 @@ cross_same() {
     done
     if [ "${#outs[@]}" -lt 2 ] || [ "$failed" -gt 0 ]; then
         record fail "cross.$1" "$failed of $((${#outs[@]} + failed)) nodes ($2) gave no output"
-    elif [ "$(printf '%s\n' "${outs[@]}" | sort -u | wc -l)" -eq 1 ]; then
+    elif [ "$(for out in "${outs[@]}"; do printf '%s' "$out" | sha256sum; done | sort -u | wc -l)" -eq 1 ]; then
         record pass "cross.$1" "the same output on ${#outs[@]} nodes ($2)"
     else
-        record fail "cross.$1" "the output differs on the ${#outs[@]} nodes ($2): $(printf '%s | ' "${outs[@]}" | cut -c1-120)"
+        record fail "cross.$1" "the output differs on the ${#outs[@]} nodes ($2): $(printf '%s | ' "${outs[@]}" | tr '\n' ' ' | cut -c1-120)"
     fi
 }
 
