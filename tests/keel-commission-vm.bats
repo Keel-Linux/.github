@@ -593,3 +593,23 @@ run_cloud() {
     [[ "$output" != *s3cret* ]]
     [ "$(head -c 8 "$TMP/w/web-01-app-after.png" | od -An -tx1 | tr -d ' \n')" = 89504e470d0a1a0a ]
 }
+
+@test "webshot: a login that ends on an error page, or on its form again, fails" {
+    command -v chromium >/dev/null || skip "no chromium on this host"
+    port=$((20000 + RANDOM % 20000))
+    python3 -I "$BATS_TEST_DIRNAME/fixtures/commission/loginsrv.py" "$port" &
+    server=$!
+    sleep 1
+    # wrong: a wrong password, and /admin answers 403, as Coraza did
+    # again: no after page, and the login shows its form again
+    printf 'shot\twrong\thttp\t%s\t/\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\nshot\tagain\thttp\t%s\t/stay\t\t#u\tadmin\t#p\tapp\t#go\t0\n' \
+        "$port" "$port" > "$TMP/shots"
+    KC_SECRET_app=wrong run python3 -I "$LIB/webshot.py" 127.0.0.1 "$TMP/w" 1 < "$TMP/shots"
+    kill "$server"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"webshot: wrong: after the login: /admin answered HTTP 403"* ]]
+    [[ "$output" == *"webshot: again: after the login: the password field #p is still on the page"* ]]
+    # the shots are still written, as evidence
+    [ -s "$TMP/w/web-01-wrong-after.png" ]
+    [ -s "$TMP/w/web-02-again-after.png" ]
+}

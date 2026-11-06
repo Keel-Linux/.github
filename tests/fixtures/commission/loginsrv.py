@@ -4,7 +4,7 @@ usage: python3 loginsrv.py PORT
 
 / is the login form (fields #u and #p, button #go); a POST of admin and
 s3cret sets a cookie and goes to /admin, which says Dashboard with the
-cookie and denied without it. /challenge is a page that goes to / after
+cookie and denied, with 403, without it. /challenge is a page that goes to / after
 two seconds, as the challenge of Anubis does once it is solved.
 """
 
@@ -12,7 +12,7 @@ import http.server
 import sys
 import urllib.parse
 
-FORM = ('<h1>Login</h1><form method=post action=/login><input id=u name=u>'
+FORM = ('<h1>Login</h1><form method=post><input id=u name=u>'
         '<input id=p name=p type=password><button id=go>Go</button></form>')
 
 
@@ -37,7 +37,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                       "<script>setTimeout(function(){location='/'}, 2000)</script>")
         elif self.path.startswith("/admin"):
             good = "kc=ok" in (self.headers.get("Cookie") or "")
-            self.page("<h1>%s</h1>" % ("Dashboard" if good else "denied"))
+            self.page("<h1>%s</h1>" % ("Dashboard" if good else "denied"), 200 if good else 403)
         else:
             self.page(FORM)
 
@@ -45,6 +45,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         size = int(self.headers["Content-Length"])
         form = urllib.parse.parse_qs(self.rfile.read(size).decode())
         good = form.get("u") == ["admin"] and form.get("p") == ["s3cret"]
+        if self.path.startswith("/stay"):
+            # a login that fails and shows its form again
+            self.page(FORM)
+            return
         self.page("", 302, {"Location": "/admin",
                             "Set-Cookie": "kc=%s; Path=/" % ("ok" if good else "no")})
 
