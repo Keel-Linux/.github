@@ -201,7 +201,7 @@ on_nodes() {
     local i name site kind image role
     for i in "${!KC_NODES[@]}"; do
         IFS=$'\t' read -r name site kind image role _ <<< "${KC_NODES[$i]}"
-        if [ "$1" = all ] || [ "$1" = "$name" ] || [ "$1" = "$role" ]; then
+        if [ "$1" = all ] || [[ ",$1," == *",$name,"* ]] || [[ ",$1," == *",$role,"* ]]; then
             echo "$i"
         fi
     done
@@ -215,10 +215,14 @@ on_nodes() {
 # output matches MATCH, and the check passes when COUNT nodes pass (all of
 # them when COUNT is empty).
 cross_checks() {
-    local row id at run match count secret i passed total value rows targets
+    local row id at run match count secret same i passed total value rows targets
     mapfile -t rows < <(grep $'^cross\t' <<< "$KC_TSV" | cut -f2-)
     for row in "${rows[@]}"; do
-        IFS=$'\t' read -r id at run match count secret <<< "$row"
+        IFS=$'\t' read -r id at run match count secret same <<< "$row"
+        if [ "$same" = same ]; then
+            cross_same "$id" "$at" "$run"
+            continue
+        fi
         passed=0 value=""
         [ "$match" != - ] || match=""
         [ "$count" != - ] || count=""
@@ -236,6 +240,26 @@ cross_checks() {
             record fail "cross.$id" "$passed of $total nodes ($at), wants ${count:-$total}"
         fi
     done
+}
+
+# cross_same ID AT RUN: pass when RUN prints the same output, not empty, on
+# every node AT names.
+cross_same() {
+    local i out outs=() failed=0
+    for i in $(on_nodes "$2"); do
+        if out=$( node_use "$i"; { printf 'export VIP=%q\n' "${KC_VIP:-}"; printf '%s\n' "$3"; } | guest_sh 2>/dev/null ) && [ -n "$out" ]; then
+            outs+=("$out")
+        else
+            failed=$((failed + 1))
+        fi
+    done
+    if [ "${#outs[@]}" -lt 2 ] || [ "$failed" -gt 0 ]; then
+        record fail "cross.$1" "$failed of $((${#outs[@]} + failed)) nodes ($2) gave no output"
+    elif [ "$(printf '%s\n' "${outs[@]}" | sort -u | wc -l)" -eq 1 ]; then
+        record pass "cross.$1" "the same output on ${#outs[@]} nodes ($2)"
+    else
+        record fail "cross.$1" "the output differs on the ${#outs[@]} nodes ($2): $(printf '%s | ' "${outs[@]}" | cut -c1-120)"
+    fi
 }
 
 # cross_one SECRET RUN MATCH: run RUN in the node with VIP and SECRET set.

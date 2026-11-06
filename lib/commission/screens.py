@@ -21,9 +21,11 @@ The lines they add to `contract.py tsv`, fields separated by a tab:
                                           GROUP 1 when REGEX has a group
     wait       PROMPT                     a screen that waits for another node:
                                           no key while it is up
-    cross      ID  AT  RUN  MATCH  COUNT  SECRET
+    cross      ID  AT  RUN  MATCH  COUNT  SECRET  SAME
                                           a check across the nodes ("-"
-                                          for an empty field)
+                                          for an empty field); SAME "same"
+                                          when every node must print the
+                                          same output
 
 KEYS is what the operator types: letters, digits and @._+-:/=~ as they are,
 and the names in braces for the other keys, for example "n", "{ret}" or
@@ -353,8 +355,16 @@ def check_cloud(doc, secrets, errors):
         if not SAFE.match(run):
             errors.append("cloud check %s: run is empty or has a tab or a newline" % cid)
         on, match = str(item.get("at", "")), str(item.get("match", ""))
-        if not (on in ROLES or on == "all" or NODE.match(on)):
+        # at: a role, a node, all, or several roles and nodes with commas
+        if not all(one in ROLES or one == "all" or NODE.match(one) for one in on.split(",")):
             errors.append("cloud check %s: at %r is not a role, a node or all" % (cid, on))
+        # same: the output must be the same on every node it runs on, a
+        # value the primary had before the pair formed, for example: the
+        # rows written after it prove nothing about the seed of the
+        # replica (keel-lnmp, BR1 and BR2, 2026-11-06)
+        same = item.get("same", False)
+        if not isinstance(same, bool):
+            errors.append("cloud check %s: same %r is not true or false" % (cid, same))
         if match:
             try:
                 re.compile(match)
@@ -369,7 +379,8 @@ def check_cloud(doc, secrets, errors):
         if "\t" in match:
             errors.append("cloud check %s: match has a tab" % cid)
         # "-" for an empty field: bash's read joins two tabs into one
-        rows.append(["cross", cid, on, run, match or "-", str(count) or "-", secret or "-"])
+        rows.append(["cross", cid, on, run, match or "-", str(count) or "-", secret or "-",
+                     "same" if same is True else "-"])
     return rows, captures
 
 
