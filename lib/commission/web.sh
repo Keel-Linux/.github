@@ -62,12 +62,26 @@ web_first_port() {
     echo "${port:-443}"
 }
 
+# web_rows: the screenshots of this machine. A node of a cloud pass with
+# screenshots of its own (nshot lines) takes them in place of the
+# contract's: the replica cannot record a login, and shows a notice
+# instead (BR2, 2026-11-06).
+web_rows() {
+    local own
+    own=$(grep -F "nshot"$'\t'"${KC_NODE:-}"$'\t' <<< "$KC_TSV" | grep $'^nshot\t')
+    if [ -n "${KC_NODE:-}" ] && [ -n "$own" ]; then
+        sed $'s/^nshot\t[^\t]*\t/shot\t/' <<< "$own"
+    else
+        grep $'^shot\t' <<< "$KC_TSV"
+    fi
+}
+
 # web_shots: take the screenshots of the contract and add them to the
 # guide. The password of a login goes to the browser from the environment
 # (KC_SECRET_NAME): no file and no command line has it.
 web_shots() {
     local rows addr port pid rc=0
-    rows=$(grep $'^shot\t' <<< "$KC_TSV") || return 0
+    rows=$(web_rows) || return 0
     addr=$(web_address "$(web_first_port "$rows")")
     if [ -z "$addr" ]; then
         record fail web.screenshots "the machine has no global address"

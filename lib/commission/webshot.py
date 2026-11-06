@@ -6,7 +6,7 @@ usage: webshot.py HOST OUTDIR FIRST < SHOTS
 SHOTS has one line per screenshot, the `shot` lines of contract.py tsv:
 
     shot  NAME  SCHEME  PORT  PATH  AFTER  USER_FIELD  USER  PASS_FIELD  SECRET
-          SUBMIT  WAIT
+          SUBMIT  WAIT  TEXT
 
 HOST is the address of the machine (an IPv6 address without brackets is
 put in brackets). Each page is opened at SCHEME://HOST:PORT/PATH in a
@@ -14,7 +14,9 @@ window of 1280x800 and written to OUTDIR/web-NN-NAME.png, NN counted from
 FIRST, WAIT seconds after it has loaded. A shot with a login fills USER_FIELD and PASS_FIELD (CSS selectors),
 clicks SUBMIT, and writes a second screenshot, web-NN-NAME-after.png, of
 AFTER (or of the page the login went to). That page must answer with an
-HTTP status below 400 and must not show PASS_FIELD again. The password is the value of the
+HTTP status below 400 and must not show PASS_FIELD again. When TEXT is
+not empty, the last page (the shot's, or the after-login one) must show it.
+The password is the value of the
 environment variable KC_SECRET_SECRET: it goes to the browser over the
 DevTools socket only, and never to a file, an argument or stdout.
 
@@ -247,7 +249,8 @@ def url_of(host, scheme, port, path):
 
 def take(browser, host, outdir, number, fields):
     """Take one shot (and its after-login shot); return the guide lines"""
-    name, scheme, port, path, after, user_field, user, pass_field, secret, submit, wait = fields
+    (name, scheme, port, path, after, user_field, user, pass_field, secret, submit, wait,
+     text) = fields
     wait = int(wait or 0)
     lines = []
     first = "web-%02d-%s.png" % (number, name)
@@ -258,6 +261,7 @@ def take(browser, host, outdir, number, fields):
     browser.shot(os.path.join(outdir, first))
     if not user_field:
         lines.append("%02d\tweb-%s\t%s\topen %s" % (number, name, first, path))
+        shows(browser, path, text)
         return lines
     lines.append("%02d\tweb-%s\t%s\tuser %s, the %s secret"
                  % (number, name, first, user, secret))
@@ -282,7 +286,15 @@ def take(browser, host, outdir, number, fields):
     if browser.evaluate("document.querySelector(%s) !== null" % json.dumps(pass_field)):
         raise OSError("after the login: the password field %s is still on the page"
                       % pass_field)
+    shows(browser, after or "the page the login opened", text)
     return lines
+
+
+def shows(browser, where, text):
+    """Raise when TEXT is not empty and the page does not show it"""
+    if text and not browser.evaluate("document.body.innerText.includes(%s)"
+                                     % json.dumps(text)):
+        raise OSError("%s does not show %r" % (where, text))
 
 
 def binary():
@@ -313,7 +325,7 @@ def main(argv):
         return 1
     try:
         for row in rows:
-            fields = (row[1:] + [""] * 11)[:11]
+            fields = (row[1:] + [""] * 12)[:12]
             try:
                 for line in take(browser, host, outdir, number, fields):
                     print(line, flush=True)

@@ -7,7 +7,11 @@ The lines they add to `contract.py tsv`, fields separated by a tab:
     vm         KEY  VALUE                 memory (MiB), cores, disk (GiB)
     installer  ID  PROMPT  KEYS  FLAGS    a screen of the ISO installer
     shot       NAME  SCHEME  PORT  PATH  AFTER  USER_FIELD  USER  PASS_FIELD
-               SECRET  SUBMIT  WAIT       a web screenshot
+               SECRET  SUBMIT  WAIT  TEXT a web screenshot; TEXT, when not
+                                          empty, must be on the last page
+    nshot      NODE  NAME ...             a web screenshot of that node only:
+                                          a node with nshot lines takes them
+                                          in place of the shot lines
     node       NAME  SITE  KIND  IMAGE  MODE  ROLE
     answer     NODE  ID  PROMPT  KEYS     a screen of that node only
     capture    WHAT  REGEX  GROUP         invite or vip, read on a screen;
@@ -238,10 +242,15 @@ def check_vm(doc, secrets, errors):
 
 
 def check_shots(doc, secrets, errors):
+    return [["shot"] + row for row in shot_rows(doc.get("screenshots", []), secrets,
+                                                 errors, "screenshots")]
+
+
+def shot_rows(items, secrets, errors, where):
+    """The fields of each screenshot of the list ITEMS (WHERE names it)"""
     rows, names = [], set()
-    items = doc.get("screenshots", [])
     if not isinstance(items, list):
-        errors.append("screenshots is not a list")
+        errors.append("%s is not a list" % where)
         return rows
     for item in items:
         if not isinstance(item, dict):
@@ -281,7 +290,14 @@ def check_shots(doc, secrets, errors):
         wait = item.get("wait", 0)
         if not isinstance(wait, int) or not 0 <= wait <= 120:
             errors.append("screenshot %s: wait %r is not 0 to 120 seconds" % (name, wait))
-        rows.append(["shot", name, str(scheme), str(port), path, after] + fields + [str(wait)])
+        # text: words the last page must show, the notice of a replica for
+        # example (BR2, 2026-11-06): a page can answer 200 and still be the
+        # wrong one
+        text = item.get("text", "")
+        if not isinstance(text, str) or not PROMPT.match(text or "x"):
+            errors.append("screenshot %s: text %r is not usable" % (name, text))
+        rows.append([name, str(scheme), str(port), path, after] + fields
+                    + [str(wait), str(text)])
     return rows
 
 
@@ -389,6 +405,9 @@ def check_node(item, secrets, captures, errors):
         if bad:
             errors.append("node %s: answer %s: %s" % (name, aid, bad))
         rows.append(["answer", name, aid, prompt, str(answer.get("keys"))])
+    if "screenshots" in item:
+        rows += [["nshot", name] + row for row in shot_rows(
+            item["screenshots"], secrets, errors, "node %s: screenshots" % name)]
     return rows, name, mode, role
 
 
