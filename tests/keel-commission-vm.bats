@@ -437,7 +437,7 @@ EOF
     grep -qx $'02\temail\tscreens/02-email.txt\tadmin@example.invalid' "$OUT/lxc-interactive/screens.tsv"
     # a choice gets its keys and nothing else once the screen is still: no
     # emptied field, no Enter
-    grep -qF -- '-ex {Is your email correct} { step; set launched 1; settle; sleep 1; puts "\nKC_SEEN ok"; send -- "y"; exp_continue }' "$TMP/console.exp"
+    grep -qF -- '-ex {Is your email correct} { step; set launched 1; settle; sleep 1; puts "\nKC_SEEN ok"; choose "y"; exp_continue }' "$TMP/console.exp"
 }
 
 # ---- the cloud modes -------------------------------------------------------
@@ -499,13 +499,17 @@ run_cloud() {
         [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
     done
     # node two got the invite and the VIP of node one's screen, as keys
-    grep -qF 'send -- "keel1:SECRETTOKEN\r"' "$TMP/console.9002.exp"
-    grep -qF 'send -- "fd00::ffff:1\r"' "$TMP/console.9002.exp"
-    grep -qF 'send -- "\033\[B\r"' "$TMP/console.9001.exp"
+    grep -qF 'choose "keel1:SECRETTOKEN\r"' "$TMP/console.9002.exp"
+    grep -qF 'choose "fd00::ffff:1\r"' "$TMP/console.9002.exp"
+    grep -qF 'choose "\033\[B\r"' "$TMP/console.9001.exp"
     grep -qF -- '-re {keel1:[A-Za-z0-9_-]+} { puts "\nKC_INVITE $expect_out(0,string)"; answered_in $expect_out(buffer); exp_continue }' "$TMP/console.9001.exp"
     # the screen whose title a capture takes gets its answer there, once
     grep -qF 'set node_answers [list "mode"' "$TMP/console.9001.exp"
     grep -qF 'proc answered_in {text}' "$TMP/console.9001.exp"
+    # a choice sends its keys, waits for the menu to draw them, then Enter
+    grep -qF 'proc choose {keys}' "$TMP/console.9001.exp"
+    grep -qF 'expect -timeout 5 -re {.+} { set drawn 1 }' "$TMP/console.9001.exp"
+    grep -qF 'choose $ak } }' "$TMP/console.9001.exp"
     # on a screen that waits for the other node, no key and no step
     grep -qF -- '-ex {Waiting for the nodes} { set waiting 1; exp_continue }' "$TMP/console.9001.exp"
     grep -qF -- 'timeout { if {$waiting} { set waiting 0; incr waited; if {$waited > 3600} { puts "\nKC_STUCK"; exit 0 }; exp_continue }; step;' "$TMP/console.9001.exp"

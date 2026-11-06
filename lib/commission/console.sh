@@ -44,8 +44,16 @@ console_script() {
     printf 'array set done {}\nset node_answers [list'
     [ -z "${2:-}" ] || awk -F'\t' '{ printf " \"%s\" \"%s\" \"%s\"", $1, $2, $3 }' "$2"
     printf ']\n'
-    printf 'proc answered_in {text} { global node_answers done; foreach {aid ap ak} $node_answers { if {[info exists done($aid)] || [string first $ap $text] < 0} { continue }; set done($aid) 1; step; puts "\\nKC_SEEN $aid"; send -- $ak } }\n'
+    printf 'proc answered_in {text} { global node_answers done; foreach {aid ap ak} $node_answers { if {[info exists done($aid)] || [string first $ap $text] < 0} { continue }; set done($aid) 1; step; puts "\\nKC_SEEN $aid"; choose $ak } }\n'
     printf 'set launched 0\nset steps 0\nset waiting 0\nset waited 0\n'
+    # choose KEYS: the keys of a choice are sent before their Enter, and
+    # the Enter goes only once the menu has drawn them. A hotkey sent to a
+    # menu that does not read yet is lost, and the Enter then takes the
+    # default: the Mode screen of a cloud replica chose Simple (BR1,
+    # 2026-11-06, round 11). A hotkey that draws nothing in 5 seconds is
+    # sent again, at most 3 times. Keys of more than one character are
+    # sent once: a second time would move a menu again.
+    printf '%s\n' 'proc choose {keys} { set head [string range $keys 0 end-1]; if {[string length $keys] < 2 || [string index $keys end] ne "\r" || [string first "\r" $head] >= 0} { send -- $keys; return }; for {set i 0} {$i < 3} {incr i} { send -- $head; set drawn 0; expect -timeout 5 -re {.+} { set drawn 1 } timeout {} eof {}; if {$drawn || [string length $head] > 1} { break } }; sleep 0.3; send -- "\r" }'
     # every screen counts, so no loop between screens runs for ever
     printf 'proc step {} { global steps waiting; set waiting 0; incr steps; if {$steps > %s} { puts "\\nKC_STUCK"; exit 0 } }\n' \
         "$KC_CONSOLE_STEPS"
@@ -96,7 +104,7 @@ console_script() {
     # the keyboard: its Enter took the default (BR2, 2026-11-06). Then they
     # get their keys as they
     # are: no field to empty and no Enter after them
-    awk -F'\t' 'FILENAME != ARGV[1] || $4 == "choice" { printf "    -ex {%s} { step; set launched 1; settle; sleep 1; puts \"\\nKC_SEEN %s\"; send -- \"%s\"; exp_continue }\n", $2, $1, $3 }' \
+    awk -F'\t' 'FILENAME != ARGV[1] || $4 == "choice" { printf "    -ex {%s} { step; set launched 1; settle; sleep 1; puts \"\\nKC_SEEN %s\"; choose \"%s\"; exp_continue }\n", $2, $1, $3 }' \
         "$1" "${2:-/dev/null}"
     # confconsole is no question: a login that opens it and not keel-init
     # is recorded, and it is left as an operator leaves it, by its Advanced
