@@ -29,7 +29,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body.encode())
 
     def do_GET(self):
-        if self.path.startswith("/challenge"):
+        if "HeadlessChrome" in (self.headers.get("User-Agent") or ""):
+            # as Anubis does: a browser that names itself headless is denied
+            self.page("<h1>Access Denied</h1>", 403)
+        elif self.path.startswith("/challenge"):
             self.page("<p>Making sure you are not a bot</p>"
                       "<script>setTimeout(function(){location='/'}, 2000)</script>")
         elif self.path.startswith("/admin"):
