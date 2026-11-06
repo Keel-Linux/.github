@@ -270,7 +270,7 @@ EOF
 @test "preseed: the description is written root only, and a deferred question fails" {
     small_contract
     good_machine
-    printf 'INFO: [35mysqlpass] not asked, nobody can answer\nERR: [40wordpress] failed - exit code 1\n' > "$GUEST/var/log/inithooks.log"
+    printf "INFO: [35mysqlpass] not asked, nobody can answer (yes): no DB_PASS in /etc/inithooks.conf: the MariaDB account 'admin' stays unable to authenticate; declare secrets.db_password in the instance description, or keel-init asks it\nERR: [40wordpress] failed - exit code 1\n" > "$GUEST/var/log/inithooks.log"
     printf 'root\n' > "$STATE/shadow"
     run_pass lxc-preseed --keep
     [ "$status" -eq 1 ]
@@ -287,6 +287,42 @@ EOF
     [ "$(stat -c %a "$s/db_password")" = 600 ]
     grep -qx '[A-Za-z0-9]\{24\}' "$s/root_password"
     [ -e "$STATE/unmounted" ]
+}
+
+# A step that asks nothing logs "not asked" too (console_skipped of
+# inithooks): 75keel-role with installation.mode described says that its
+# mode screen draws nothing. That is no question left to keel-init (BR1,
+# 2026-11-06). A deferred question is in the record of console_deferred,
+# /var/lib/inithooks/deferred, or its line says that keel-init asks it.
+@test "preseed: a step that asks nothing is answered; one in the record of keel-init is not" {
+    small_contract
+    good_machine
+    printf "INFO: [30rootpass] not asked, nobody can answer (yes): confconsole's mode screen is run without a terminal and draws nothing\n" > "$GUEST/var/log/inithooks.log"
+    printf 'root\n' > "$STATE/shadow"
+    run_pass lxc-preseed --keep
+    [[ "$output" == *"pass  preseed.answered.30rootpass"* ]]
+    [[ "$output" == *"pass  preseed.answered.35mysqlpass"* ]]
+    rm -f "$STATE/exists"
+    mkdir -p "$GUEST/var/lib/inithooks"
+    printf '35mysqlpass\n' > "$GUEST/var/lib/inithooks/deferred"
+    run_pass lxc-preseed --keep
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"pass  preseed.answered.30rootpass"* ]]
+    [[ "$output" == *"fail  preseed.answered.35mysqlpass"* ]]
+}
+
+# Fail closed: a hook that leaves its question with console_skipped and
+# words of its own is deferred too. Only keel_firstboot's "draws nothing"
+# is a step with nothing to ask.
+@test "preseed: a not asked line in other words is a deferred question" {
+    small_contract
+    good_machine
+    printf 'INFO: [30rootpass] not asked, nobody can answer (yes): the password stays as it is\n' > "$GUEST/var/log/inithooks.log"
+    printf 'root\n' > "$STATE/shadow"
+    run_pass lxc-preseed --keep
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"fail  preseed.answered.30rootpass"* ]]
+    [[ "$output" == *"pass  preseed.answered.35mysqlpass"* ]]
 }
 
 @test "preseed: a description that cannot be written, and no instance in the contract" {
