@@ -25,17 +25,31 @@ site_env() {
 }
 
 
-# node_rows: the node lines of this pass's mode, "NAME SITE KIND IMAGE ROLE".
+# node_rows: the node lines of this pass's mode, "NAME SITE KIND IMAGE ROLE
+# CONTRACT".
 node_rows() {
-    awk -F'\t' -v mode="$KC_PASS" '$1 == "node" && $6 == mode { print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $7 }' <<< "$KC_TSV"
+    awk -F'\t' -v mode="$KC_PASS" '$1 == "node" && $6 == mode { print $2 "\t" $3 "\t" $4 "\t" $5 "\t" $7 "\t" $8 }' <<< "$KC_TSV"
+}
+
+# node_tsv CONTRACT: the contract lines of a node of another appliance (the
+# Keel Core witness): the questions, proofs, checks and screenshots of its
+# own contract, and of this one its answers, its screenshots and the
+# screens of the cloud modes (capture, wait).
+node_tsv() {
+    python3 -I "$KC_LIB/contract.py" tsv "$1" | grep -vE $'^(node|answer|nshot|capture|wait|cross)\t'
+    grep -E $'^(answer|nshot)\t'"$KC_NODE"$'\t' <<< "$KC_TSV"
+    grep -E $'^(capture|wait)\t' <<< "$KC_TSV"
 }
 
 # node_use INDEX: the globals of the node KC_NODES[INDEX]. The loops over
 # the nodes call it in a subshell, so each node keeps its own.
 node_use() {
-    local name site kind image role
-    IFS=$'\t' read -r name site kind image role <<< "${KC_NODES[$1]}"
+    local name site kind image role contract
+    IFS=$'\t' read -r name site kind image role contract <<< "${KC_NODES[$1]}"
     KC_NODE="$name" KC_KIND="$kind" KC_VMID=$((KC_BASE_VMID + $1)) KC_IMAGE="$image"
+    if [ -n "$contract" ] && [ "$contract" != - ]; then
+        KC_TSV=$(node_tsv "$contract")
+    fi
     if [ "$KC_IMAGE" = - ]; then
         if [ "$kind" = vm ]; then KC_IMAGE="$KC_ISO"; else KC_IMAGE="$KC_TEMPLATE"; fi
     fi
@@ -137,7 +151,7 @@ node_free() {
 # node_meta INDEX: OUT/PASS/NODE/meta, what the guide names the column by.
 node_meta() {
     local name site kind image role
-    IFS=$'\t' read -r name site kind image role <<< "${KC_NODES[$1]}"
+    IFS=$'\t' read -r name site kind image role _ <<< "${KC_NODES[$1]}"
     mkdir -p "$KC_OUT/$KC_PASS/$name"
     printf 'node\t%s\nsite\t%s\nkind\t%s\nrole\t%s\nvmid\t%s\n' "$name" "$site" "$kind" \
         "$role" "$((KC_BASE_VMID + $1))" > "$KC_OUT/$KC_PASS/$name/meta"
@@ -186,7 +200,7 @@ nodes_merge() {
 on_nodes() {
     local i name site kind image role
     for i in "${!KC_NODES[@]}"; do
-        IFS=$'\t' read -r name site kind image role <<< "${KC_NODES[$i]}"
+        IFS=$'\t' read -r name site kind image role _ <<< "${KC_NODES[$i]}"
         if [ "$1" = all ] || [ "$1" = "$name" ] || [ "$1" = "$role" ]; then
             echo "$i"
         fi

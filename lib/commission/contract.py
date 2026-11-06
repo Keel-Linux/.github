@@ -219,6 +219,19 @@ def check_checks(doc, errors):
 
 
 def tsv(path):
+    rows, errors = contract_rows(path, nested=False)
+    if errors:
+        fail(errors)
+    for row in rows:
+        print("\t".join(row))
+
+
+def contract_rows(path, nested):
+    """The tsv rows of the contract at PATH and its errors. A node may name
+    the contract of another appliance (the Keel Core witness of a cloud
+    advanced set, decision 0076): that contract is checked too, it must
+    have no nodes of its own (NESTED), and its secrets must be secrets of
+    this one, which the runner makes once for the whole pass."""
     doc = load(path)
     errors = []
     if doc.get("contract") != 1:
@@ -234,10 +247,28 @@ def tsv(path):
     rows += screens.rows(doc, secrets, errors)
     if "instance" in doc and not isinstance(doc["instance"], dict):
         errors.append("instance is not a mapping")
-    if errors:
-        fail(errors)
+    if nested and doc.get("nodes"):
+        errors.append("a contract that a node names has nodes of its own")
     for row in rows:
-        print("\t".join(row))
+        if row[0] == "node" and row[7] != "-":
+            row[7] = node_contract(path, row[1], row[7], secrets, errors)
+    return rows, errors
+
+
+def node_contract(path, node, name, secrets, errors):
+    """The absolute path of the contract NAME that NODE names, relative to
+    the directory of PATH, checked"""
+    other = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(path)), name))
+    if not os.path.isfile(other):
+        errors.append("node %s: contract %s is not a file" % (node, name))
+        return other
+    rows, more = contract_rows(other, nested=True)
+    errors += ["node %s: %s: %s" % (node, name, e) for e in more]
+    extra = sorted(r[1] for r in rows if r[0] == "secret" and r[1] not in secrets)
+    if extra:
+        errors.append("node %s: contract %s has secrets this one does not declare: %s"
+                      % (node, name, ", ".join(extra)))
+    return other
 
 
 def render(value, missing):
