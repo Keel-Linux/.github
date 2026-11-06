@@ -50,11 +50,9 @@ import urllib.request
 # The user agent of a desktop Chrome. Headless Chromium names itself
 # HeadlessChrome, and Anubis, in front of a cloud node, denies that name
 # (BR1 and BR2, 2026-11-06): the operator's browser is what the gallery
-# shows, so the shots ask as one. KC_WEB_UA changes it.
-USER_AGENT = os.environ.get(
-    "KC_WEB_UA",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko)"
-    " Chrome/140.0.0.0 Safari/537.36")
+# shows, so the shots ask as one.
+USER_AGENT = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko)"
+              " Chrome/140.0.0.0 Safari/537.36")
 WIDTH, HEIGHT = 1280, 800
 
 
