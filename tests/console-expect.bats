@@ -46,3 +46,12 @@ run_console() {
     [[ $output == *"KC_SEEN invite"* ]]
     [[ $output == *"KC_SEEN invite2"* ]]
 }
+
+@test "a hotkey of two letters reaches a menu that does not read yet, one letter at a time" {
+    # sent at once, "CC" went to a menu that did not read yet and the Enter
+    # took Simple (LNPP cloud advanced, BR2, 2026-11-06)
+    run_console $'mode\tInstallation mode\tCC\\r\n' $'slow Installation mode\n'
+    echo "$output"
+    [ "$(cat "$TMP/keys")" = $'Installation mode\tCC' ]
+}
+
