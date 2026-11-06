@@ -44,7 +44,18 @@ console_script() {
     printf 'array set done {}\nset node_answers [list'
     [ -z "${2:-}" ] || awk -F'\t' '{ printf " \"%s\" \"%s\" \"%s\"", $1, $2, $3 }' "$2"
     printf ']\n'
-    printf 'proc answered_in {text} { global node_answers done; foreach {aid ap ak} $node_answers { if {[info exists done($aid)] || [string first $ap $text] < 0} { continue }; set done($aid) 1; step; puts "\\nKC_SEEN $aid"; choose $ak } }\n'
+    # next_answer PROMPT: the first answer of PROMPT not given yet. Each
+    # answer is given once, and the answers of one prompt in the order of
+    # the contract: the primary of cloud advanced shows "Invite a node"
+    # twice, for the replica and then for the witness
+    printf '%s\n' 'proc next_answer {prompt} { global node_answers done; foreach {aid ap ak} $node_answers { if {$ap eq $prompt && ![info exists done($aid)]} { return [list $aid $ak] } }; return {} }'
+    printf '%s\n' 'proc answered_in {text} { global node_answers done; set seen {}; foreach {aid ap ak} $node_answers { if {[lsearch -exact $seen $ap] >= 0 || [string first $ap $text] < 0} { continue }; lappend seen $ap; set a [next_answer $ap]; if {$a eq {}} { continue }; lassign $a id keys; set done($id) 1; step; puts "\nKC_SEEN $id"; choose $keys } }'
+    # node_answer PROMPT: the screen PROMPT of the node gets its next
+    # answer, and nothing when all its answers are given. keel-init shows
+    # the output of the Mode choice in a box with the same title,
+    # "Installation mode": its second match took the Role screen with it,
+    # and the keys of the Mode went to the Role menu (BR1, 2026-11-06)
+    printf '%s\n' 'proc node_answer {prompt} { global done launched; set a [next_answer $prompt]; if {$a eq {}} { return }; lassign $a id keys; set done($id) 1; step; set launched 1; settle; sleep 1; puts "\nKC_SEEN $id"; choose $keys }'
     printf 'set launched 0\nset steps 0\nset waiting 0\nset waited 0\n'
     # choose KEYS: the keys of a choice are sent before their Enter, and
     # the Enter goes only once the menu has drawn them. A hotkey sent to a
@@ -104,8 +115,10 @@ console_script() {
     # the keyboard: its Enter took the default (BR2, 2026-11-06). Then they
     # get their keys as they
     # are: no field to empty and no Enter after them
-    awk -F'\t' 'FILENAME != ARGV[1] || $4 == "choice" { printf "    -ex {%s} { step; set launched 1; settle; sleep 1; puts \"\\nKC_SEEN %s\"; choose \"%s\"; exp_continue }\n", $2, $1, $3 }' \
-        "$1" "${2:-/dev/null}"
+    awk -F'\t' '$4 == "choice" { printf "    -ex {%s} { step; set launched 1; settle; sleep 1; puts \"\\nKC_SEEN %s\"; choose \"%s\"; exp_continue }\n", $2, $1, $3 }' "$1"
+    # a screen of the node: one pattern for each prompt, which takes the
+    # next answer of that prompt (node_answer)
+    [ -z "${2:-}" ] || awk -F'\t' '!seen[$2]++ { printf "    -ex {%s} { node_answer {%s}; exp_continue }\n", $2, $2 }' "$2"
     # confconsole is no question: a login that opens it and not keel-init
     # is recorded, and it is left as an operator leaves it, by its Advanced
     # Menu and Quit. Escape only moves between its menus, and killing it
