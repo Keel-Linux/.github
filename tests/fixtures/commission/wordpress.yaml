@@ -12,10 +12,6 @@ questions:
     hook: 35mysqlpass
     prompt: MariaDB password
     answer: secret:db
-  - id: wordpress_db_password
-    hook: 40wordpress
-    prompt: WordPress database password
-    answer: secret:db
   - id: wordpress_password
     hook: 40wordpress
     prompt: WordPress password
@@ -61,7 +57,7 @@ instance:
     options:
       admin_user: admin
       site_title: WordPress
-      db_user: wordpress
+      db_user: admin
       db_name: wordpress
       db_prefix: wp_
   hub:
@@ -72,7 +68,9 @@ instance:
   first_login_wizard: false
 proofs:
   - {secret: root, kind: shadow, user: root}
-  - {secret: db, kind: mysql, user: wordpress, host: 127.0.0.1}
+  # lnmp's account (35mysqlpass); the site logs in as www-data over the
+  # socket with no password (keel-wordpress#43)
+  - {secret: db, kind: mysql, user: admin, host: 127.0.0.1}
   - secret: app
     kind: command
     run: wp --allow-root --path=/var/www/wordpress user check-password admin "$SECRET"
@@ -98,6 +96,7 @@ screenshots:
     url: /
     login: {user_field: 'input[name=user]', user: root, password_field: 'input[name=pass]', secret: root, submit: 'button[type=submit]'}
     wait: 8
+    text: System hostname
 # The cloud modes (decision 0076). The prompts are the titles of the
 # confconsole screens, which are data here: a new title is a change of
 # this file, not of keel-commission. The installer of the vm-iso pass
@@ -119,15 +118,34 @@ cloud:
     # primary's (the replica was not seeded and kept its own first-boot
     # site, keel-lnmp BR1/BR2 2026-11-06)
     - {id: seeded, at: 'primary,replica', run: 'mysql -N -e "SELECT CONCAT(user_registered, 0x20, user_pass) FROM wordpress.wp_users WHERE ID = 1"', same: true}
+    # one set of salts and one socket account for the pair: the salts as a
+    # hash, never the values (keel-wordpress#43)
+    - id: salts-same
+      at: 'primary,replica'
+      run: 'wp --allow-root --path=/var/www/wordpress eval "echo hash(\"sha256\", wp_salt(\"auth\") . wp_salt(\"secure_auth\") . wp_salt(\"logged_in\") . wp_salt(\"nonce\"));"'
+      same: true
+    - {id: account-same, at: 'primary,replica', run: 'mysql -N -e "SHOW GRANTS FOR ''www-data''@''localhost''"', same: true}
+    - {id: no-salt-constant, at: 'primary,replica', run: '! grep -qE "define\(.(AUTH|SECURE_AUTH|LOGGED_IN|NONCE)_(KEY|SALT)" /var/www/wordpress/wp-config.php && echo none', match: '^none$'}
     - {id: row-written, at: primary, run: 'mysql -e "CREATE DATABASE IF NOT EXISTS kc_probe; CREATE TABLE IF NOT EXISTS kc_probe.t (v INT); INSERT INTO kc_probe.t VALUES (42)"'}
     - {id: row-replicated, at: replica, run: 'sleep 5; mysql -N -e "SELECT v FROM kc_probe.t"', match: '^42$'}
     - {id: files-follow, at: replica, run: 'k=$(cat /var/lib/keel/filesync/apikey); curl -s -H "X-API-Key: $k" http://127.0.0.1:8384/rest/config/folders', match: 'receiveonly'}
     - {id: files-sent, at: primary, run: 'k=$(cat /var/lib/keel/filesync/apikey); curl -s -H "X-API-Key: $k" http://127.0.0.1:8384/rest/config/folders', match: 'sendonly'}
     - {id: promote, at: replica, run: 'keel vip promote'}
     - {id: promoted-holder, at: replica, run: 'keel vip status', match: 'carried here: yes'}
+    # the administrator logs in on the new primary, whose database now takes
+    # writes: a 302 and a wordpress_logged_in cookie, over the loopback
+    - id: login-new-primary
+      at: replica
+      secret: app
+      run: 'c=$(mktemp); printf "%s" "$SECRET" > "$c.p"; code=$(curl -sk -o /dev/null -w "%{http_code}" -c "$c" -b "wordpress_test_cookie=WP%20Cookie%20check" --data-urlencode log=admin --data-urlencode "pwd@$c.p" --data-urlencode testcookie=1 https://127.0.0.1/wp-login.php); rm -f "$c.p"; grep -q wordpress_logged_in "$c" && echo "login $code"; rm -f "$c"'
+      match: '^login 302$'
+    # the old primary replicates from the new one and has applied all it
+    # received before it takes the VIP back (keel 0.23.84)
+    - {id: old-primary-follows, at: primary, run: 'for i in $(seq 60); do s=$(mysql -e "SHOW SLAVE STATUS\\G"); grep -q "Slave_SQL_Running: Yes" <<< "$s" && grep -q "Seconds_Behind_Master: 0" <<< "$s" && grep -q "has read all relay log" <<< "$s" && echo caught-up && exit 0; sleep 5; done; exit 1', match: '^caught-up$'}
     - {id: return, at: primary, run: 'keel vip promote'}
     - {id: returned-holder, at: primary, run: 'keel vip status', match: 'carried here: yes'}
     - {id: probe-dropped, at: primary, run: 'mysql -e "DROP DATABASE kc_probe"'}
+    - {id: no-failed-units, at: all, run: 'systemctl --failed --no-legend --plain | wc -l', match: '^0$', count: 2}
 nodes:
   - name: primary
     site: br1
@@ -159,3 +177,4 @@ nodes:
         url: /
         login: {user_field: 'input[name=user]', user: root, password_field: 'input[name=pass]', secret: root, submit: 'button[type=submit]'}
         wait: 8
+        text: System hostname
