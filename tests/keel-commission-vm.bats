@@ -498,10 +498,12 @@ run_cloud() {
         "pass  cross.voters"; do
         [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
     done
-    # node two got the invite and the VIP of node one's screen, as keys
-    grep -qF 'choose "keel1:SECRETTOKEN\r"' "$TMP/console.9002.exp"
-    grep -qF 'choose "fd00::ffff:1\r"' "$TMP/console.9002.exp"
-    grep -qF 'choose "\033\[B\r"' "$TMP/console.9001.exp"
+    # node two got the invite and the VIP of node one's screen, as keys of
+    # its answers, each screen of the node by one pattern (node_answer)
+    grep '^set node_answers' "$TMP/console.9002.exp" | grep -qF '"keel1:SECRETTOKEN\r"'
+    grep '^set node_answers' "$TMP/console.9002.exp" | grep -qF '"fd00::ffff:1\r"'
+    grep '^set node_answers' "$TMP/console.9001.exp" | grep -qF '"\033\[B\r"'
+    grep -qF -- '-ex {Installation mode} { node_answer {Installation mode}; exp_continue }' "$TMP/console.9001.exp"
     grep -qF -- '-re {keel1:[A-Za-z0-9_-]+} { puts "\nKC_INVITE $expect_out(0,string)"; answered_in $expect_out(buffer); exp_continue }' "$TMP/console.9001.exp"
     # the screen whose title a capture takes gets its answer there, once
     grep -qF 'set node_answers [list "mode"' "$TMP/console.9001.exp"
@@ -509,7 +511,7 @@ run_cloud() {
     # a choice sends its keys, waits for the menu to draw them, then Enter
     grep -qF 'proc choose {keys}' "$TMP/console.9001.exp"
     grep -qF 'expect -timeout 5 -re {.+} { set drawn 1 }' "$TMP/console.9001.exp"
-    grep -qF 'choose $ak } }' "$TMP/console.9001.exp"
+    grep -qF 'choose $keys } }' "$TMP/console.9001.exp"
     # on a screen that waits for the other node, no key and no step
     grep -qF -- '-ex {Waiting for the nodes} { set waiting 1; exp_continue }' "$TMP/console.9001.exp"
     grep -qF -- 'timeout { if {$waiting} { set waiting 0; incr waited; if {$waited > 3600} { puts "\nKC_STUCK"; exit 0 }; exp_continue }; step;' "$TMP/console.9001.exp"
@@ -548,7 +550,8 @@ run_cloud() {
     run_cloud
     echo "$output"
     # node one answers the screen with its own keys, and only with them
-    grep -qF 'choose "\033\[B\r"' "$TMP/console.9001.exp"
+    grep '^set node_answers' "$TMP/console.9001.exp" | grep -qF '"\033\[B\r"'
+    grep -qF -- '-ex {Installation mode} { node_answer {Installation mode}; exp_continue }' "$TMP/console.9001.exp"
     [ "$(grep -cF -- '-ex {Installation mode}' "$TMP/console.9001.exp")" -eq 1 ]
     # node two has no answer of that id: the question stays
     grep -qF -- '-ex {Installation mode} { step; set launched 1; settle; sleep 1; puts "\nKC_SEEN mode"; choose "\r"; exp_continue }' "$TMP/console.9002.exp"
