@@ -38,6 +38,13 @@ console_script() {
     # 2026-11-06)
     printf 'fconfigure stdout -buffering line\n'
     printf 'set stty_init "rows 40 columns 120"\n'
+    # answered_in TEXT: a capture takes the text before its line too, and
+    # with it the title of the screen that shows the line ("Invite a
+    # node"): that screen's answer, once, is given here (BR1, 2026-11-06)
+    printf 'array set done {}\nset node_answers [list'
+    [ -z "${2:-}" ] || awk -F'\t' '{ printf " \"%s\" \"%s\" \"%s\"", $1, $2, $3 }' "$2"
+    printf ']\n'
+    printf 'proc answered_in {text} { global node_answers done; foreach {aid ap ak} $node_answers { if {[info exists done($aid)] || [string first $ap $text] < 0} { continue }; set done($aid) 1; step; puts "\\nKC_SEEN $aid"; send -- $ak } }\n'
     printf 'set launched 0\nset steps 0\nset waiting 0\nset waited 0\n'
     # every screen counts, so no loop between screens runs for ever
     printf 'proc step {} { global steps waiting; set waiting 0; incr steps; if {$steps > %s} { puts "\\nKC_STUCK"; exit 0 } }\n' \
@@ -80,7 +87,7 @@ console_script() {
     mapfile -t captures < <(grep $'^capture\t' <<< "$KC_TSV" | cut -f2-)
     for regex in "${captures[@]}"; do
         IFS=$'\t' read -r what regex group <<< "$regex"
-        printf '    -re {%s} { puts "\\nKC_%s $expect_out(%s,string)"; exp_continue }\n' "$regex" "${what^^}" "$group"
+        printf '    -re {%s} { puts "\\nKC_%s $expect_out(%s,string)"; answered_in $expect_out(buffer); exp_continue }\n' "$regex" "${what^^}" "$group"
     done
     # a screen of the node and a choice of keel-init get their keys once the
     # screen stays still: a title is drawn before its menu, and keys sent on

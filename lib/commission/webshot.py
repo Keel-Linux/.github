@@ -187,6 +187,19 @@ class Browser:
             raise OSError("%s: %s" % (url, result["errorText"]))
         self.settle()
 
+    def wait_for(self, selector):
+        """Wait up to the browser's wait for SELECTOR on the page. A cloud
+        node puts Anubis in front: its challenge page comes first, and the
+        login form only once the browser has solved it (BR1 and BR2,
+        2026-11-06). True when it came."""
+        deadline = time.time() + self.wait
+        probe = "document.querySelector(%s) !== null" % json.dumps(selector)
+        while time.time() < deadline:
+            if self.evaluate(probe):
+                return True
+            time.sleep(0.5)
+        return False
+
     def login(self, user_field, user, pass_field, password, submit):
         fill = ("(function(s, v){var e=document.querySelector(s); if(!e) return false;"
                 " e.focus(); e.value=v; e.dispatchEvent(new Event('input',{bubbles:true}));"
@@ -226,6 +239,8 @@ def take(browser, host, outdir, number, fields):
     lines = []
     first = "web-%02d-%s.png" % (number, name)
     browser.open(url_of(host, scheme, port, path))
+    if user_field:
+        browser.wait_for(user_field)
     time.sleep(wait)
     browser.shot(os.path.join(outdir, first))
     if not user_field:

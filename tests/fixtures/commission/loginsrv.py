@@ -4,7 +4,8 @@ usage: python3 loginsrv.py PORT
 
 / is the login form (fields #u and #p, button #go); a POST of admin and
 s3cret sets a cookie and goes to /admin, which says Dashboard with the
-cookie and denied without it.
+cookie and denied without it. /challenge is a page that goes to / after
+two seconds, as the challenge of Anubis does once it is solved.
 """
 
 import http.server
@@ -28,7 +29,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body.encode())
 
     def do_GET(self):
-        if self.path.startswith("/admin"):
+        if self.path.startswith("/challenge"):
+            self.page("<p>Making sure you are not a bot</p>"
+                      "<script>setTimeout(function(){location='/'}, 2000)</script>")
+        elif self.path.startswith("/admin"):
             good = "kc=ok" in (self.headers.get("Cookie") or "")
             self.page("<h1>%s</h1>" % ("Dashboard" if good else "denied"))
         else:

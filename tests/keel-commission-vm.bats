@@ -502,11 +502,14 @@ run_cloud() {
     grep -qF 'send -- "keel1:SECRETTOKEN\r"' "$TMP/console.9002.exp"
     grep -qF 'send -- "fd00::ffff:1\r"' "$TMP/console.9002.exp"
     grep -qF 'send -- "\033\[B\r"' "$TMP/console.9001.exp"
-    grep -qF -- '-re {keel1:[A-Za-z0-9_-]+} { puts "\nKC_INVITE $expect_out(0,string)"; exp_continue }' "$TMP/console.9001.exp"
+    grep -qF -- '-re {keel1:[A-Za-z0-9_-]+} { puts "\nKC_INVITE $expect_out(0,string)"; answered_in $expect_out(buffer); exp_continue }' "$TMP/console.9001.exp"
+    # the screen whose title a capture takes gets its answer there, once
+    grep -qF 'set node_answers [list "mode"' "$TMP/console.9001.exp"
+    grep -qF 'proc answered_in {text}' "$TMP/console.9001.exp"
     # on a screen that waits for the other node, no key and no step
     grep -qF -- '-ex {Waiting for the nodes} { set waiting 1; exp_continue }' "$TMP/console.9001.exp"
     grep -qF -- 'timeout { if {$waiting} { set waiting 0; incr waited; if {$waited > 3600} { puts "\nKC_STUCK"; exit 0 }; exp_continue }; step;' "$TMP/console.9001.exp"
-    grep -qF -- '-re {VIP (fd00:[0-9a-f:]+)} { puts "\nKC_VIP $expect_out(1,string)"; exp_continue }' "$TMP/console.9001.exp"
+    grep -qF -- '-re {VIP (fd00:[0-9a-f:]+)} { puts "\nKC_VIP $expect_out(1,string)"; answered_in $expect_out(buffer); exp_continue }' "$TMP/console.9001.exp"
     # each site's own PVE host, the vmids one after the other
     grep -q '^pve2 pct create 9002 ' "$LOG"
     grep -q '^pve pct create 9001 ' "$LOG"
@@ -574,7 +577,8 @@ run_cloud() {
     python3 -I "$BATS_TEST_DIRNAME/fixtures/commission/loginsrv.py" "$port" &
     server=$!
     sleep 1
-    printf 'shot\tapp\thttp\t%s\t/\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\nshot\tfront\thttp\t%s\t/x\t\t\t\t\t\t\t0\nshot\tbad\thttp\t%s\t/\t\t#nofield\tadmin\t#p\tapp\t#go\t0\n' \
+    # app: the login form comes after a challenge page, as behind Anubis
+    printf 'shot\tapp\thttp\t%s\t/challenge\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\nshot\tfront\thttp\t%s\t/x\t\t\t\t\t\t\t0\nshot\tbad\thttp\t%s\t/\t\t#nofield\tadmin\t#p\tapp\t#go\t0\n' \
         "$port" "$port" "$port" > "$TMP/shots"
     KC_SECRET_app=s3cret run python3 -I "$LIB/webshot.py" 127.0.0.1 "$TMP/w" 1 < "$TMP/shots"
     kill "$server"
