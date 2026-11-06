@@ -733,6 +733,51 @@ EOF
     done
 }
 
+@test "cloud: a check that wants the same output on several nodes" {
+    cloud_contract
+    cat >> "$TMP/c.yaml" <<'EOF'
+  - name: zz
+    site: br1
+    mode: simple
+EOF
+    python3 - "$TMP/c.yaml" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("  checks:\n", "  checks:\n    - {id: seeded, at: 'primary,replica', run: 'keel seed', same: true}\n    - {id: differs, at: 'one,two', run: 'keel node', same: true}\n    - {id: empty, at: all, run: 'keel none', same: true}\n", 1)
+open(p, "w").write(s)
+PY2
+    run python3 -I "$CONTRACT_PY" tsv "$TMP/c.yaml"
+    [[ "$output" == *$'cross\tseeded\tprimary,replica\tkeel seed\t-\t-\t-\tsame'* ]]
+    [[ "$output" == *$'cross\tholder\tall\tkeel vip status\tholder\t1\t-\t-'* ]]
+    printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    # keel of the guest: "seed" the same on both, "node" its own vmid, "none" nothing
+    cat > "$GBIN/keel" <<'EOF'
+#!/bin/bash
+case "$1" in
+    seed) echo kc9001-boot-row ;;
+    node) echo "kc$KC_FAKE_VMID" ;;
+    none) exit 0 ;;
+    *) cat "$STATE/keel.$KC_FAKE_VMID" 2>/dev/null ;;
+esac
+EOF
+    chmod +x "$GBIN/keel"
+    printf 'vip fd00::ffff:1: holder\n3 voter(s)\n' > "$STATE/keel.9001"
+    run_cloud
+    echo "$output"
+    [[ "$output" == *"pass  cross.seeded                             the same output on 2 nodes (primary,replica)"* ]]
+    [[ "$output" == *"fail  cross.differs                            the output differs on the 2 nodes (one,two): kc9001 | kc9002"* ]]
+    [[ "$output" == *"fail  cross.empty                              2 of 2 nodes (all) gave no output"* ]]
+    # a list in at takes roles and node names
+    run "$KC" --check "$TMP/c.yaml"
+    [ "$status" -eq 0 ]
+    sed -i "s/at: 'primary,replica'/at: 'primary,Bad'/; s/same: true}/same: yes-please}/" "$TMP/c.yaml"
+    run "$KC" --check "$TMP/c.yaml"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"cloud check seeded: at 'primary,Bad' is not a role, a node or all"* ]]
+    [[ "$output" == *"cloud check seeded: same 'yes-please' is not true or false"* ]]
+}
+
 @test "cloud: no invite in time, a check that fails, and a mode with no node" {
     cloud_contract
     good_machine

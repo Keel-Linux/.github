@@ -114,6 +114,11 @@ cloud:
   # here: yes" on the node that holds the VIP; Syncthing folder types)
   checks:
     - {id: vip-holder, at: all, run: 'keel vip status', match: 'carried here: yes', count: 1}
+    # the replica holds the primary's site, made before the pair formed:
+    # the first user's registration time and password hash are the
+    # primary's (the replica was not seeded and kept its own first-boot
+    # site, keel-lnmp BR1/BR2 2026-11-06)
+    - {id: seeded, at: 'primary,replica', run: 'mysql -N -e "SELECT CONCAT(user_registered, 0x20, user_pass) FROM wordpress.wp_users WHERE ID = 1"', same: true}
     - {id: row-written, at: primary, run: 'mysql -e "CREATE DATABASE IF NOT EXISTS kc_probe; CREATE TABLE IF NOT EXISTS kc_probe.t (v INT); INSERT INTO kc_probe.t VALUES (42)"'}
     - {id: row-replicated, at: replica, run: 'sleep 5; mysql -N -e "SELECT v FROM kc_probe.t"', match: '^42$'}
     - {id: files-follow, at: replica, run: 'k=$(cat /var/lib/keel/filesync/apikey); curl -s -H "X-API-Key: $k" http://127.0.0.1:8384/rest/config/folders', match: 'receiveonly'}
