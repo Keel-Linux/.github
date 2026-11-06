@@ -529,6 +529,21 @@ run_cloud() {
     grep -qx $'result\tpass' "$OUT/cloud_simple/meta"
 }
 
+@test "mask.py: the pieces that a sliding input box leaves beside an invite go too" {
+    # the Join a mesh box of a replica is narrower than the invite: it
+    # redraws pieces of it beside the whole line, and pieces shorter than
+    # PIECE stayed in screens/07-join.txt (keel-core, BR2, 2026-11-06)
+    mkdir -p "$TMP/m"
+    printf 'keel1:SECRETTOKENRETTOKEN\nRETTOKkeel1:SECRETTOKEN\nx keel1:SECRETTOKEN x\nx1:SECRETTOKENx\nkeel1:SECRETTOKENab\n' > "$TMP/m/screen.txt"
+    printf 'keel1:SECRETTOKEN\n' | python3 -I "${CONTRACT_PY%/*}/mask.py" "$TMP/m"
+    run cat "$TMP/m/screen.txt"
+    [ "${lines[0]}" = '<invite 1>' ]
+    [ "${lines[1]}" = '<invite 1>' ]
+    [ "${lines[2]}" = 'x <invite 1> x' ]
+    [ "${lines[3]}" = 'x<invite 1>x' ]
+    [ "${lines[4]}" = '<invite 1>ab' ]
+}
+
 @test "cloud: a node's answer replaces the question of the same id" {
     # an app contract asks the Mode screen as a question, Simple by Enter, for
     # its single node passes; the node of a cloud mode answers the same
