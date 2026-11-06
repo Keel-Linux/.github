@@ -529,6 +529,39 @@ run_cloud() {
     grep -qx $'result\tpass' "$OUT/cloud_simple/meta"
 }
 
+@test "cloud: a node with screenshots of its own takes them in place of the contract's" {
+    cloud_contract
+    sed -i "/keys: '{vip}{ret}'/a\\    screenshots: [{name: notice, url: /wp-login.php, text: This node is the replica}]" "$TMP/c.yaml"
+    printf 'screenshots:\n  - {name: site, url: /}\n' >> "$TMP/c.yaml"
+    run python3 -I "$CONTRACT_PY" tsv "$TMP/c.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'shot\tsite\thttps\t443\t/\t\t\t\t\t\t\t0\t'* ]]
+    [[ "$output" == *$'nshot\ttwo\tnotice\thttps\t443\t/wp-login.php\t\t\t\t\t\t\t0\tThis node is the replica'* ]]
+    echo 2001:db8::5 > "$STATE/ip-6"
+    printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    printf 'vip fd00::ffff:1: holder\n3 voter(s)\n' > "$STATE/keel.9001"
+    printf 'vip fd00::ffff:1: follower\n' > "$STATE/keel.9002"
+    run_cloud
+    echo "$output"
+    [ -e "$OUT/cloud_simple/one/screens/web-01-site.png" ]
+    [ ! -e "$OUT/cloud_simple/one/screens/web-01-notice.png" ]
+    [ -e "$OUT/cloud_simple/two/screens/web-01-notice.png" ]
+    [ ! -e "$OUT/cloud_simple/two/screens/web-01-site.png" ]
+}
+
+@test "the text of a screenshot is a usable line" {
+    small_contract
+    printf 'screenshots:\n  - {name: a, url: /, text: "a\\tb"}\n  - {name: b, url: /, text: [1]}\n' >> "$TMP/c.yaml"
+    run "$KC" --check "$TMP/c.yaml"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"screenshot a: text 'a\tb' is not usable"* ]]
+    [[ "$output" == *"screenshot b: text [1] is not usable"* ]]
+    printf 'nodes:\n  - {name: p, site: br1, mode: simple, screenshots: {}}\n' >> "$TMP/c.yaml"
+    run "$KC" --check "$TMP/c.yaml"
+    [[ "$output" == *"node p: screenshots is not a list"* ]]
+}
+
 @test "cloud: no invite in time, a check that fails, and a mode with no node" {
     cloud_contract
     good_machine
@@ -595,6 +628,24 @@ run_cloud() {
     [[ "$output" == *"webshot: bad: no field #nofield on the page"* ]]
     [[ "$output" != *s3cret* ]]
     [ "$(head -c 8 "$TMP/w/web-01-app-after.png" | od -An -tx1 | tr -d ' \n')" = 89504e470d0a1a0a ]
+}
+
+@test "webshot: the text a page must show, in headless Chromium" {
+    command -v chromium >/dev/null || skip "no chromium on this host"
+    port=$((20000 + RANDOM % 20000))
+    python3 -I "$BATS_TEST_DIRNAME/fixtures/commission/loginsrv.py" "$port" &
+    server=$!
+    sleep 1
+    printf 'shot\tyes\thttp\t%s\t/\t\t\t\t\t\t\t0\tLogin\nshot\tno\thttp\t%s\t/\t\t\t\t\t\t\t0\tThis node is the replica\nshot\tafter\thttp\t%s\t/challenge\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\tDashboard\n' \
+        "$port" "$port" "$port" > "$TMP/shots"
+    KC_SECRET_app=s3cret run python3 -I "$LIB/webshot.py" 127.0.0.1 "$TMP/w" 1 < "$TMP/shots"
+    kill "$server"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *$'01\tweb-yes\tweb-01-yes.png\topen /'* ]]
+    [[ "$output" == *"webshot: no: / does not show 'This node is the replica'"* ]]
+    [[ "$output" == *$'03\tweb-after-after\tweb-03-after-after.png\tafter the login: /admin'* ]]
+    [[ "$output" != *"webshot: after"* ]]
+    [[ "$output" != *"webshot: yes"* ]]
 }
 
 @test "webshot: a login that ends on an error page, or on its form again, fails" {
