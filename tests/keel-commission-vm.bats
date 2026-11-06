@@ -433,8 +433,9 @@ EOF
     grep -qx 'the email box' "$f/02-email.txt"
     grep -qx $'01\troot_password\tscreens/01-root_password.txt\t(the root secret)' "$OUT/lxc-interactive/screens.tsv"
     grep -qx $'02\temail\tscreens/02-email.txt\tadmin@example.invalid' "$OUT/lxc-interactive/screens.tsv"
-    # a choice gets its keys and nothing else: no emptied field, no Enter
-    grep -qF -- '-ex {Is your email correct} { step; set launched 1; puts "\nKC_SEEN ok"; send -- "y"; exp_continue }' "$TMP/console.exp"
+    # a choice gets its keys and nothing else once the screen is still: no
+    # emptied field, no Enter
+    grep -qF -- '-ex {Is your email correct} { step; set launched 1; settle; puts "\nKC_SEEN ok"; send -- "y"; exp_continue }' "$TMP/console.exp"
 }
 
 # ---- the cloud modes -------------------------------------------------------
