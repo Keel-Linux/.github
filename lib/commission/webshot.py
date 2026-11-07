@@ -16,7 +16,9 @@ clicks SUBMIT, and writes a second screenshot, web-NN-NAME-after.png, of
 AFTER (or of the page the login went to). That page must answer with an
 HTTP status below 400 and must not show PASS_FIELD again. When TEXT is
 not empty, the last page (the shot's, or the after-login one) must show it,
-and its shot is taken once it shows it (at most KC_WEB_WAIT seconds).
+and its shot is taken once it shows it (at most KC_WEB_WAIT seconds). Every
+stylesheet link of a page shot, of the page's own origin, must have rules
+that the browser can read, and no stylesheet request may answer 400 or more.
 The password is the value of the
 environment variable KC_SECRET_SECRET: it goes to the browser over the
 DevTools socket only, and never to a file, an argument or stdout.
@@ -286,6 +288,7 @@ def take(browser, host, outdir, number, fields):
         browser.wait_text(text)
     time.sleep(wait)
     browser.shot(os.path.join(outdir, first))
+    styled(browser, path)
     if not user_field:
         lines.append("%02d\tweb-%s\t%s\topen %s" % (number, name, first, path))
         shows(browser, path, text)
@@ -303,6 +306,7 @@ def take(browser, host, outdir, number, fields):
         browser.wait_text(text)
     time.sleep(wait)
     browser.shot(os.path.join(outdir, second))
+    styled(browser, after or "the page the login opened")
     lines.append("%02d\tweb-%s-after\t%s\tafter the login: %s"
                  % (number, name, second, after or "the page the login opened"))
     # the shot is written, as evidence, before the page is judged: a login
@@ -317,6 +321,44 @@ def take(browser, host, outdir, number, fields):
                       % pass_field)
     shows(browser, after or "the page the login opened", text)
     return lines
+
+
+# the stylesheet links of the page that did not load, and the stylesheet
+# requests that answered 400 or more, as "URL" or "URL STATUS". Chromium
+# keeps a sheet for a link that got an error or a page that is not CSS
+# (a 404 page, or Anubis's challenge), but its rules cannot be read: a
+# link of the page's own origin whose rules cannot be read did not load. An
+# empty CSS file has 0 rules and loaded. The rules of a link of another
+# origin cannot be read at all: only its status counts, and it is 0 when
+# that origin does not allow timing.
+UNSTYLED = """(function () {
+  var bad = [];
+  document.querySelectorAll('link[rel~="stylesheet"]').forEach(function (l) {
+    var rules = -1;
+    try {
+      if (new URL(l.href, location.href).origin !== location.origin) { return; }
+      rules = l.sheet ? l.sheet.cssRules.length : -1;
+    } catch (e) { rules = -1; }
+    if (rules < 0) { bad.push(l.href); }
+  });
+  performance.getEntriesByType('resource').forEach(function (e) {
+    if (e.initiatorType === 'link' && e.responseStatus >= 400) {
+      bad.push(e.name + ' ' + e.responseStatus);
+    }
+  });
+  return bad;
+})()"""
+
+
+def styled(browser, where):
+    """Raise when a stylesheet of the page did not load. The login page of a
+    cloud advanced replica was shot with no style, and the run counted it
+    (wordpress, BR2, 2026-11-07). The shot is written before: it is the
+    evidence of the failure."""
+    bad = browser.evaluate(UNSTYLED)
+    if bad:
+        raise OSError("%s has a stylesheet that did not load: %s"
+                      % (where, ", ".join(str(item) for item in bad)))
 
 
 def shows(browser, where, text):
