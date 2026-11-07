@@ -138,8 +138,12 @@ class Browser:
         self.process = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.DEVNULL)
         self.next_id = 0
+        # the answers to the stylesheet requests of the page: a stylesheet
+        # that did not load is said with what the browser got for it
+        self.sheets = {}
         self.ws = Socket(self.page_socket(), wait)
         self.call("Page.enable")
+        self.call("Network.enable")
         self.call("Emulation.setDeviceMetricsOverride", width=WIDTH,
                   height=HEIGHT, deviceScaleFactor=1, mobile=False)
 
@@ -175,10 +179,58 @@ class Browser:
         self.ws.send(json.dumps({"id": mine, "method": method, "params": params}))
         while True:
             message = json.loads(self.ws.receive())
+            self.note(message)
             if message.get("id") == mine:
                 if "error" in message:
                     raise OSError("%s: %s" % (method, message["error"].get("message")))
                 return message.get("result", {})
+
+    def note(self, message):
+        """Keep the events of the stylesheet requests of the page"""
+        event, params = message.get("method"), message.get("params", {})
+        if event == "Network.responseReceived" and params.get("type") == "Stylesheet":
+            response = params.get("response", {})
+            self.sheets[response.get("url")] = {
+                "id": params.get("requestId"), "status": response.get("status"),
+                "type": response.get("mimeType")}
+        elif event == "Network.loadingFailed" and params.get("type") == "Stylesheet":
+            for sheet in self.sheets.values():
+                if sheet.get("id") == params.get("requestId"):
+                    sheet["error"] = params.get("errorText")
+                    return
+            self.sheets[params.get("requestId")] = {
+                "id": params.get("requestId"), "error": params.get("errorText")}
+
+    def answer(self, url):
+        """What the browser got for the stylesheet URL: the status, the type
+        and the first bytes, or the error of the request"""
+        sheet = self.sheets.get(url)
+        if sheet is None:
+            return "no answer"
+        if sheet.get("status") is None:
+            return "failed: %s" % sheet.get("error")
+        start = ""
+        try:
+            body = self.call("Network.getResponseBody", requestId=sheet["id"])
+            data = body.get("body", "")
+            if body.get("base64Encoded"):
+                data = base64.b64decode(data).decode("utf-8", "replace")
+            start = " ".join(data[:80].split())
+        except OSError:
+            start = "(no body)"
+        text = "status %s, %s, starts %s" % (sheet["status"], sheet.get("type"), start)
+        if sheet.get("error"):
+            text += ", failed: %s" % sheet["error"]
+        return text
+
+    def not_css(self):
+        """The stylesheets of the page that the server answered with a type
+        other than text/css: Chromium keeps a sheet of 0 rules for them that
+        it can read, as for an empty CSS file (Anubis's challenge, replica,
+        BR2, 2026-11-07)"""
+        return [url for url, sheet in self.sheets.items()
+                if sheet.get("status") is not None
+                and (sheet.get("type") or "").split(";")[0].strip() != "text/css"]
 
     def evaluate(self, expression):
         result = self.call("Runtime.evaluate", expression=expression,
@@ -206,6 +258,7 @@ class Browser:
         time.sleep(0.5)
 
     def open(self, url):
+        self.sheets = {}
         result = self.call("Page.navigate", url=url)
         if result.get("errorText"):
             raise OSError("%s: %s" % (url, result["errorText"]))
@@ -355,10 +408,13 @@ def styled(browser, where):
     cloud advanced replica was shot with no style, and the run counted it
     (wordpress, BR2, 2026-11-07). The shot is written before: it is the
     evidence of the failure."""
-    bad = browser.evaluate(UNSTYLED)
+    bad = browser.evaluate(UNSTYLED) or []
+    bad = bad + [url for url in browser.not_css() if url not in bad]
     if bad:
+        said = ["%s (%s)" % (item, browser.answer(str(item).split(" ")[0]))
+                for item in bad]
         raise OSError("%s has a stylesheet that did not load: %s"
-                      % (where, ", ".join(str(item) for item in bad)))
+                      % (where, ", ".join(said)))
 
 
 def shows(browser, where, text):

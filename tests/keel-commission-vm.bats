@@ -589,7 +589,8 @@ run_cloud() {
     # The login page of a cloud advanced replica was shot with no style at
     # all, and the run counted it (wordpress, BR2, 2026-11-07). A shot now
     # fails when a stylesheet link of the page has no sheet or answered 400
-    # or more; the picture stays as the evidence of it.
+    # or more, and says what the browser got; the picture stays as the
+    # evidence of it.
     run python3 -I - "${CONTRACT_PY%/*}/webshot.py" "$TMP" <<'PY'
 import importlib.util, os, sys
 spec = importlib.util.spec_from_file_location("webshot", sys.argv[1])
@@ -613,21 +614,39 @@ class Fake:
         return False
     def shot(self, path):
         self.shots.append(path)
+    def answer(self, url):
+        return "status 200, text/html, starts <!doctype html>" if url.endswith(".php") else "no answer"
+    def not_css(self):
+        return list(self.html)
+    html = []
 fields = ("site", "https", "443", "/", "", "", "", "", "", "", "0", "")
 good = Fake([])
 webshot.take(good, "fd00::1", sys.argv[2], 1, fields)
 print("styled page: %d shot" % len(good.shots))
-bad = Fake(["https://10.0.0.1/wp-admin/load-styles.php 403"])
+bad = Fake(["https://10.0.0.1/wp-admin/load-styles.php"])
 try:
     webshot.take(bad, "fd00::1", sys.argv[2], 2, fields)
     print("unstyled page passed")
 except OSError as e:
     print("unstyled page: %s (%d shot)" % (e, len(bad.shots)))
+# Anubis's challenge as a stylesheet: Chromium keeps a sheet of 0 rules
+# that it can read, as for an empty CSS file; only the type of the answer
+# tells them apart (replica, BR2, 2026-11-07)
+challenged = Fake([])
+challenged.html = ["https://10.0.0.1/wp-admin/load-styles.php"]
+try:
+    webshot.take(challenged, "fd00::1", sys.argv[2], 3, fields)
+    print("challenged page passed")
+except OSError as e:
+    print("challenged page: %s (%d shot)" % (e, len(challenged.shots)))
 PY
     echo "$output"
     [ "$status" -eq 0 ]
     [[ "$output" == *"styled page: 1 shot"* ]]
-    [[ "$output" == *"unstyled page: / has a stylesheet that did not load: https://10.0.0.1/wp-admin/load-styles.php 403 (1 shot)"* ]]
+    # what the browser got for it is said too: the challenge of Anubis, a
+    # PHP error and a 502 differ in the status, the type and the first bytes
+    [[ "$output" == *"unstyled page: / has a stylesheet that did not load: https://10.0.0.1/wp-admin/load-styles.php (status 200, text/html, starts <!doctype html>) (1 shot)"* ]]
+    [[ "$output" == *"challenged page: / has a stylesheet that did not load: https://10.0.0.1/wp-admin/load-styles.php (status 200, text/html, starts <!doctype html>) (1 shot)"* ]]
 }
 
 @test "webshot.py: the shot of a page with a text waits until the page shows it" {
@@ -664,6 +683,8 @@ class Fake:
         return False
     def shot(self, path):
         self.shots.append((path, self.asked))
+    def not_css(self):
+        return []
 os.environ["KC_SECRET_root"] = "x"
 browser = Fake()
 browser.wait_text = webshot.Browser.wait_text.__get__(browser)
