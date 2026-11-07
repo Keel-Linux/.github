@@ -181,13 +181,40 @@ node_free() {
     done
 }
 
-# node_meta INDEX: OUT/PASS/NODE/meta, what the guide names the column by.
+# node_meta INDEX: OUT/PASS/NODE/meta, what the guide names the column by,
+# and the image the node is made from with its sha256 on the node's own
+# PVE host: one volume name can hold other bytes on another site. "own"
+# says whether the node is of this appliance (no contract of its own).
 node_meta() {
-    local name site kind image role
-    IFS=$'\t' read -r name site kind image role _ <<< "${KC_NODES[$1]}"
+    local name site kind image role contract sha
+    IFS=$'\t' read -r name site kind image role contract <<< "${KC_NODES[$1]}"
     mkdir -p "$KC_OUT/$KC_PASS/$name"
-    printf 'node\t%s\nsite\t%s\nkind\t%s\nrole\t%s\nvmid\t%s\n' "$name" "$site" "$kind" \
-        "$role" "$((KC_BASE_VMID + $1))" > "$KC_OUT/$KC_PASS/$name/meta"
+    image=$( node_use "$1"; printf '%s' "$KC_IMAGE" )
+    sha=$( node_use "$1"; template_sha "$KC_IMAGE" 2>/dev/null )
+    printf 'node\t%s\nsite\t%s\nkind\t%s\nrole\t%s\nvmid\t%s\nimage\t%s\nsha256\t%s\nown\t%s\n' \
+        "$name" "$site" "$kind" "$role" "$((KC_BASE_VMID + $1))" "$image" "$sha" \
+        "$([ "${contract:--}" = - ] && echo yes || echo no)" > "$KC_OUT/$KC_PASS/$name/meta"
+}
+
+# nodes_sha: the sha256 of the pass, in OUT/PASS/meta, by which the release
+# gate finds the record of a template (apt lib/commission.sh): the image of
+# the nodes of this appliance. They must all be the same bytes, or the
+# pass is the proof of no one image and fails.
+nodes_sha() {
+    local shas="" row meta
+    for row in "${KC_NODES[@]}"; do
+        meta="$KC_OUT/$KC_PASS/${row%%$'\t'*}/meta"
+        if grep -qx $'own\tyes' "$meta"; then
+            shas+="$(sed -n 's/^sha256\t//p' "$meta")"$'\n'
+        fi
+    done
+    shas=$(sort -u <<< "${shas%$'\n'}")
+    if [ -z "$shas" ] || [ "$(wc -l <<< "$shas")" -ne 1 ] || [[ ! "$shas" =~ ^[0-9a-f]{64}$ ]]; then
+        record fail images.same "the nodes of this appliance do not boot one image: ${shas//$'\n'/ }"
+        return 0
+    fi
+    printf 'sha256\t%s\n' "$shas" >> "$KC_OUT/$KC_PASS/meta"
+    record pass images.same "every node of this appliance boots $shas"
 }
 
 # pass_nodes: every node of the mode, each in the background as soon as
@@ -206,8 +233,11 @@ pass_nodes() {
     node_images
     node_free
     for i in "${!KC_NODES[@]}"; do
-        name="${KC_NODES[$i]%%$'\t'*}"
         node_meta "$i"
+    done
+    nodes_sha
+    for i in "${!KC_NODES[@]}"; do
+        name="${KC_NODES[$i]%%$'\t'*}"
         read -r -a wants <<< "$(node_wants "$name")"
         if [ "$i" -gt 0 ] && ! node_wait "$KC_OUT/$KC_PASS/${KC_NODES[0]%%$'\t'*}/console.log" "${pids[0]}" "${wants[0]}" "${wants[1]:-}"; then
             record fail "$name:started" "the first node showed no invite line it needs"

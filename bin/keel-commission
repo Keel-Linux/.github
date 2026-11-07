@@ -25,7 +25,10 @@
 #                boot of the disk are answered on its screen (--iso);
 #                cloud_simple, cloud_advanced: every node of that mode in
 #                the contract's nodes, then the checks across them (a node
-#                without an image of its own takes --template or --iso)
+#                without an image of its own takes --template or --iso).
+#                The meta of the pass names the sha256 of the image of
+#                this appliance's nodes, which must be one image on every
+#                site; each node's meta names its image and sha256
 #   --site       the site name written in the record (br1, br2)
 #   --out        where the record goes: DIR/PASS/record.tsv, meta, the
 #                console transcript, the screens, and DIR/guide.md

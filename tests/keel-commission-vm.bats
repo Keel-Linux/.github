@@ -536,6 +536,38 @@ run_cloud() {
     grep -qx $'01\tjoin\tscreens/01-join.txt\t(invite 1 of the first node)<ret>' "$OUT/cloud_simple/two/screens.tsv"
     grep -q '| Step | one, primary (br1) | two, replica (br2) |' "$OUT/guide.md"
     grep -qx $'result\tpass' "$OUT/cloud_simple/meta"
+    # the release gate finds the record by the sha256 of the template the
+    # nodes of this appliance boot, read on each node's own PVE host
+    local sha node
+    sha=$(printf 'template bytes\n' | sha256sum | cut -d' ' -f1)
+    grep -qx $'sha256\t'"$sha" "$OUT/cloud_simple/meta"
+    [[ "$output" == *"pass  images.same"* ]]
+    for node in one two; do
+        grep -qx $'sha256\t'"$sha" "$OUT/cloud_simple/$node/meta"
+        grep -qx $'image\tlocal:vztmpl/t.tar.zst' "$OUT/cloud_simple/$node/meta"
+        grep -qx $'own\tyes' "$OUT/cloud_simple/$node/meta"
+    done
+    grep -q '^pve2 sha256sum ' "$LOG"
+}
+
+@test "cloud: nodes of this appliance that boot other bytes on another site prove no one template" {
+    cloud_contract
+    good_machine
+    answering_expect
+    # one volume name, other bytes on BR2
+    printf '#!/bin/bash\nprintf "template bytes %%s\\n" "${FAKE_SITE:-br1}" > "$TMP/template.${FAKE_SITE:-br1}"\necho "$TMP/template.${FAKE_SITE:-br1}"\n' > "$FAKES/pvesm"
+    printf '#!/bin/bash\nprintf "pve2 %%s\\n" "$*" >> "$LOG"\nexport FAKE_SITE=br2\nexec bash -c "$*"\n' > "$FAKES/pve2"
+    chmod +x "$FAKES/pve2"
+    export KC_PVE_BR2="$FAKES/pve2" KC_BOOT_TIMEOUT=30
+    printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    run_cloud
+    echo "$output"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"fail  images.same"*"do not boot one image"* ]]
+    [ "$(grep -c $'^sha256\t' "$OUT/cloud_simple/meta")" = 0 ]
+    grep -qx $'result\tfail' "$OUT/cloud_simple/meta"
+    [ "$(sed -n 's/^sha256\t//p' "$OUT/cloud_simple/one/meta")" != "$(sed -n 's/^sha256\t//p' "$OUT/cloud_simple/two/meta")" ]
 }
 
 @test "mask.py: the pieces that a sliding input box leaves beside an invite go too" {
@@ -814,6 +846,11 @@ EOF
     grep -q 'pct create 9003 local:vztmpl/core.tar.zst' "$LOG"
     run ! grep -q 'MariaDB password' "$TMP/console.9003.exp"
     grep -q 'SECONDINVITE' "$TMP/console.9003.exp"
+    # the witness is another appliance: its image is recorded, and it does
+    # not count for the sha256 of this appliance's pass
+    grep -qx $'own\tno' "$OUT/cloud_advanced/three/meta"
+    grep -qx $'image\tlocal:vztmpl/core.tar.zst' "$OUT/cloud_advanced/three/meta"
+    grep -qx $'own\tyes' "$OUT/cloud_advanced/four/meta"
 }
 
 @test "cloud: the contract a node names is checked" {
