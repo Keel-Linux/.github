@@ -1,0 +1,58 @@
+# The applications that have a page at keellinux.org/apps/NAME/ (handbook
+# decision 0077), for pages.py. Each one names its repository and the
+# version of the application it ships, which the page shows above the Keel
+# release. "match" is text that must be in "file" of the appliance
+# repository: pages.py stops when it is not, so a new version in the
+# repository cannot leave an old one on the page.
+#
+# The follow-up is a "version:" key in the manifest of each appliance, which
+# only keel-core and keel-web have now.
+apps:
+  core:
+    repo: keel-core
+    name: Keel Core
+    version: Debian 13
+    file: changelog
+    match: Debian 13.x/Trixie
+  web:
+    repo: keel-web
+    name: Keel Web
+    version: Nginx of Debian 13, Coraza and Anubis
+    file: plan/main
+    match: trixie's
+  lnmp:
+    repo: keel-lnmp
+    name: Keel LNMP
+    version: PHP 8.4 and MariaDB 11.8
+    file: README.rst
+    match: PHP-FPM 8.4 and MariaDB 11.8
+  lnpp:
+    repo: keel-lnpp
+    name: Keel LNPP
+    version: PostgreSQL 17 and Python 3
+    file: README.rst
+    match: PostgreSQL 17
+  postgresql:
+    repo: keel-postgresql
+    name: Keel PostgreSQL
+    version: PostgreSQL 17
+    file: changelog
+    match: PostgreSQL 17 from Debian 13
+  laravel:
+    repo: keel-laravel
+    name: Keel Laravel
+    version: Laravel 12
+    file: conf.d/main
+    match: LARAVEL_CONSTRAINT='^12.0'
+  wordpress:
+    repo: keel-wordpress
+    name: Keel WordPress
+    version: WordPress 7.1.4
+    file: conf.d/main
+    match: WP_VERSION=7.1.4
+  odoo:
+    repo: keel-odoo
+    name: Keel Odoo
+    version: Odoo 18.0
+    file: conf.d/main
+    match: ODOO_TAG=snapshot-18.0-
