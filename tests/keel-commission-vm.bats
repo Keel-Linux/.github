@@ -553,6 +553,51 @@ run_cloud() {
     [ "${lines[4]}" = '<invite 1>ab' ]
 }
 
+@test "webshot.py: a page whose stylesheet did not load fails, after its shot is written" {
+    # The login page of a cloud advanced replica was shot with no style at
+    # all, and the run counted it (wordpress, BR2, 2026-11-07). A shot now
+    # fails when a stylesheet link of the page has no sheet or answered 400
+    # or more; the picture stays as the evidence of it.
+    run python3 -I - "${CONTRACT_PY%/*}/webshot.py" "$TMP" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("webshot", sys.argv[1])
+webshot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(webshot)
+webshot.time.sleep = lambda s: None
+class Fake:
+    wait = 1
+    def __init__(self, bad):
+        self.bad = bad
+        self.shots = []
+    def open(self, url):
+        pass
+    def wait_text(self, text):
+        return True
+    def evaluate(self, expression):
+        if "stylesheet" in expression:
+            return self.bad
+        if "innerText.includes" in expression:
+            return True
+        return False
+    def shot(self, path):
+        self.shots.append(path)
+fields = ("site", "https", "443", "/", "", "", "", "", "", "", "0", "")
+good = Fake([])
+webshot.take(good, "fd00::1", sys.argv[2], 1, fields)
+print("styled page: %d shot" % len(good.shots))
+bad = Fake(["https://10.0.0.1/wp-admin/load-styles.php 403"])
+try:
+    webshot.take(bad, "fd00::1", sys.argv[2], 2, fields)
+    print("unstyled page passed")
+except OSError as e:
+    print("unstyled page: %s (%d shot)" % (e, len(bad.shots)))
+PY
+    echo "$output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"styled page: 1 shot"* ]]
+    [[ "$output" == *"unstyled page: / has a stylesheet that did not load: https://10.0.0.1/wp-admin/load-styles.php 403 (1 shot)"* ]]
+}
+
 @test "webshot.py: the shot of a page with a text waits until the page shows it" {
     # Webmin's dashboard on a VM of BR2 came later than the page stayed
     # still: the after-login shot showed the menu only (2026-11-06). A shot
