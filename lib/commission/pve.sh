@@ -52,7 +52,14 @@ template_sha() {
 # secret, and the root proof checks the root secret. KC_CT_OPTS adds the
 # site's storage and network options.
 ct_create() {
-    pve_retry "pct create $KC_VMID '$1' --hostname kc$KC_VMID --unprivileged 1 --features nesting=1 --password '$KC_LOGIN_SECRET' $KC_CT_OPTS"
+    local ns=""
+    # KC_NAMESERVER (KC_NAMESERVER_<SITE>): the resolvers of the container.
+    # The test net of BR1 gives a container no IPv4, and pct copies the PVE
+    # host's nameserver 1.1.1.1 into it: no name resolved, and no alert left
+    # the node (2026-11-07)
+    # (keel-commission checks each value before the first machine)
+    [ -z "${KC_NAMESERVER:-}" ] || ns=" --nameserver '$KC_NAMESERVER'"
+    pve_retry "pct create $KC_VMID '$1' --hostname kc$KC_VMID --unprivileged 1 --features nesting=1 --password '$KC_LOGIN_SECRET'$ns $KC_CT_OPTS"
 }
 
 ct_start() {

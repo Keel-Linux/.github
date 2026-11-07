@@ -63,7 +63,10 @@ case "$1" in
     mount) [ -e "$STATE/mount-odd" ] && { echo "mounted CT $2 somewhere"; exit 0; }
            [ ! -e "$STATE/mount-fails" ] && echo "mounted CT $2 in '$GUEST/$2/rootfs'" ;;
     exec)
+        # the guest paths go under $GUEST; a path that the script writes
+        # into the spec ("file": ...) stays as the node sees it
         sed -e "s#/etc/default/#$GUEST/etc/default/#g" -e "s#/var/#$GUEST/var/#g" \
+            -e "/\"file\": /!s#/etc/keel/#$GUEST/etc/keel/#g" \
             -e "s#/usr/lib/inithooks/#$GUEST/usr/lib/inithooks/#g" \
             | KC_FAKE_VMID="$2" PATH="$GBIN:$PATH" bash -s ;;
 esac

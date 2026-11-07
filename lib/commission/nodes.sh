@@ -16,7 +16,7 @@
 # site_env SITE: the PVE host and the options of SITE.
 site_env() {
     local up="${1^^}" var
-    for var in KC_PVE KC_CT_OPTS KC_VM_OPTS KC_VM_STORAGE KC_VM_FIRMWARE; do
+    for var in KC_PVE KC_CT_OPTS KC_VM_OPTS KC_VM_STORAGE KC_VM_FIRMWARE KC_NAMESERVER; do
         local site_var="${var}_$up"
         if [ -n "${!site_var:-}" ]; then
             printf -v "$var" '%s' "${!site_var}"
@@ -146,6 +146,10 @@ invites() {
 # typed, and the frame of the join screen kept them (BR2, 2026-11-06).
 nodes_mask() {
     local lines
+    if [ -n "${KC_NTFY_TOPIC:-}" ]; then
+        { cat "$KC_NTFY_TOKEN_FILE"; [ -z "${KC_NTFY_READ_FILE:-}" ] || sed 's/^[^ ]* [^ ]* //' "$KC_NTFY_READ_FILE"; } \
+            | python3 -I "$KC_LIB/mask.py" "$KC_OUT/$KC_PASS" token
+    fi
     mapfile -t lines < <(invites "$KC_OUT/$KC_PASS/${KC_NODES[0]%%$'\t'*}/console.log")
     [ "${#lines[@]}" -gt 0 ] || return 0
     printf '%s\n' "${lines[@]#KC_INVITE }" | python3 -I "$KC_LIB/mask.py" "$KC_OUT/$KC_PASS"
@@ -162,6 +166,7 @@ node_run() {
     else
         pass_interactive || return 0
     fi
+    [ -z "${KC_NTFY_TOPIC:-}" ] || node_monitor
     common_checks
     web_shots
 }
@@ -191,6 +196,11 @@ node_meta() {
 pass_nodes() {
     local i name wants pids=()
     KC_BASE_VMID="$KC_VMID"
+    # the topic of this pass: each pass reads only its own alerts
+    if [ -n "${KC_NTFY_URL:-}" ]; then
+        KC_NTFY_TOPIC="$KC_NTFY_URL-$KC_BASE_VMID-$(date +%s)"
+        export KC_NTFY_TOPIC
+    fi
     mapfile -t KC_NODES < <(node_rows)
     [ "${#KC_NODES[@]}" -gt 0 ] || die 2 "the contract has no node of mode $KC_PASS"
     node_images
@@ -244,10 +254,10 @@ on_nodes() {
 # output matches MATCH, and the check passes when COUNT nodes pass (all of
 # them when COUNT is empty).
 cross_checks() {
-    local row id at run match count secret same modes i passed total value rows targets
+    local row id at run match count secret same modes alert within i passed total value rows targets since
     mapfile -t rows < <(grep $'^cross\t' <<< "$KC_TSV" | cut -f2-)
     for row in "${rows[@]}"; do
-        IFS=$'\t' read -r id at run match count secret same modes <<< "$row"
+        IFS=$'\t' read -r id at run match count secret same modes alert within <<< "$row"
         # a check of other modes only: the witness of cloud advanced, for
         # example, is not a node of cloud simple
         if [ "${modes:--}" != - ] && [[ ",$modes," != *",$KC_PASS,"* ]]; then
@@ -263,17 +273,91 @@ cross_checks() {
         [ "$secret" = - ] || value=$(secret_value "$secret")
         mapfile -t targets < <(on_nodes "$at")
         total="${#targets[@]}"
+        since=$(date +%s)
         for i in "${targets[@]}"; do
             if ( node_use "$i"; cross_one "$value" "$run" "$match" ); then
                 passed=$((passed + 1))
             fi
         done
-        if [ "$total" -gt 0 ] && [ "$passed" -eq "${count:-$total}" ]; then
-            record pass "cross.$id" "$passed of $total nodes ($at)"
-        else
+        if [ "$total" -eq 0 ] || [ "$passed" -ne "${count:-$total}" ]; then
             record fail "cross.$id" "$passed of $total nodes ($at), wants ${count:-$total}"
+        elif [ "${alert:--}" != - ]; then
+            alert_wait "$id" "$alert" "$within" "$since"
+        else
+            record pass "cross.$id" "$passed of $total nodes ($at)"
         fi
     done
+}
+
+# alert_wait ID ALERT WITHIN SINCE: pass when a message of the alert topic
+# of the pass (KC_NTFY_TOPIC) holds ALERT, from SINCE (epoch seconds) for
+# WITHIN seconds. The runner reads the topic itself, with the header in
+# KC_NTFY_READ_FILE: the publish token of keel-ntfy may only write
+# (decision 0063). curl takes the header as a file (-H @FILE), so it is on
+# no command line.
+alert_wait() {
+    local end out
+    if [ -z "${KC_NTFY_TOPIC:-}" ]; then
+        record fail "cross.$1" "KC_NTFY_URL is not set: no alert topic to read"
+        return
+    fi
+    if [ -z "${KC_NTFY_READ_FILE:-}" ]; then
+        record fail "cross.$1" "KC_NTFY_READ_FILE is not set: the topic cannot be read"
+        return
+    fi
+    # WITHIN counts from the start of the check, which stops the standby
+    end=$(( $4 + $3 ))
+    while :; do
+        out=$("${KC_CURL:-curl}" -s --max-time 10 -H "@$KC_NTFY_READ_FILE" "$KC_NTFY_TOPIC/json?poll=1&since=$4" 2>/dev/null || true)
+        if grep -qF -- "$2" <<< "$out"; then
+            record pass "cross.$1" "alert '$2' on the topic after $(( $(date +%s) - $4 )) s"
+            return
+        fi
+        [ "$(date +%s)" -lt "$end" ] || break
+        sleep "${KC_ALERT_POLL:-5}"
+    done
+    record fail "cross.$1" "no alert '$2' on the topic within $3 s"
+}
+
+# node_monitor: the node sends its alerts to the topic of the pass
+# (KC_NTFY_TOPIC): the token of KC_NTFY_TOKEN_FILE goes into a secret file
+# of the node, the monitor section of its spec names the topic, and keel
+# applies it. The token is in the script on stdin, never on a command line;
+# nodes_mask takes it out of every file of the pass. A node without a
+# working alert channel says nothing when its standby goes: the alert of
+# the PostgreSQL fallback was proven only once the node had one (BR1 and
+# BR2, 2026-11-07).
+node_monitor() {
+    local token
+    token=$(cat "$KC_NTFY_TOKEN_FILE")
+    # keel will make /etc/keel/secrets at the first boot (a change given to
+    # the keel agent on 2026-11-07); until that keel is out, the runner
+    # makes it, mode 0700, as the first boot would
+    if { printf 'set -e\ninstall -d -m 0700 /etc/keel/secrets\n'
+         printf "umask 077\ncat > /etc/keel/secrets/kc_ntfy_token <<'KC_TOKEN'\n%s\nKC_TOKEN\n" "$token"
+         printf 'chmod 0600 /etc/keel/secrets/kc_ntfy_token\n'
+         printf 'KC_TOPIC=%q python3 - /etc/keel/instance.yaml <<%s\n' "$KC_NTFY_TOPIC" "'PY'"
+         cat <<'PY'
+import os, sys, yaml
+path = sys.argv[1]
+with open(path) as handle:
+    spec = yaml.safe_load(handle) or {}
+monitor = spec.get("monitor") or {}
+monitor["enabled"] = True
+notify = monitor.get("notify") or {}
+notify["ntfy"] = {"url": os.environ["KC_TOPIC"],
+                  "token": {"file": "/etc/keel/secrets/kc_ntfy_token"}}
+monitor["notify"] = notify
+spec["monitor"] = monitor
+with open(path, "w") as handle:
+    yaml.safe_dump(spec, handle, sort_keys=False)
+PY
+         printf 'PY\nkeel spec apply --system-only --non-interactive --skip-network --spec /etc/keel/instance.yaml\n'
+       } | guest_sh > "$KC_DIR/monitor.out" 2>&1; then
+        record pass monitor.ntfy "the node sends its alerts to the topic of the pass"
+    else
+        record fail monitor.ntfy "the monitor of the node did not take the topic (monitor.out)"
+    fi
 }
 
 # cross_same ID AT RUN: pass when RUN prints the same output, not empty, on

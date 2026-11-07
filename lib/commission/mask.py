@@ -1,9 +1,10 @@
 #!/usr/bin/python3 -I
 """Mask the invites of a cloud pass in every file under a directory.
 
-usage: mask.py DIR < INVITES
+usage: mask.py DIR [LABEL] < INVITES
 
-INVITES has one invite per line. Each is replaced by "<invite N>", and so
+INVITES has one invite per line. Each is replaced by "<invite N>" (or
+"<LABEL N>": the token of the alert topic of a cloud pass), and so
 is each longest piece of it of PIECE bytes or more: an input box narrower
 than the invite shows windows of it that slide while it is typed. A
 piece shorter than PIECE that the box draws right beside a mark (3 bytes
@@ -33,7 +34,7 @@ def masked(run, invite, mark):
     return out
 
 
-def main(directory, invites):
+def main(directory, invites, label=b"invite"):
     """Mask each invite in each file under directory"""
     for top, _, names in os.walk(directory):
         for name in names:
@@ -41,7 +42,7 @@ def main(directory, invites):
             with open(path, "rb") as handle:
                 text = old = handle.read()
             for n, invite in enumerate(invites, 1):
-                mark = b"<invite %d>" % n
+                mark = b"<%s %d>" % (label, n)
                 text = re.sub(rb"[A-Za-z0-9_.~+/=:-]{%d,}" % PIECE,
                               lambda m: masked(m.group(0), invite, mark), text)
             text = BESIDE.sub(rb"\1", text)
@@ -51,4 +52,5 @@ def main(directory, invites):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], [line.rstrip("\n").encode() for line in sys.stdin if line.strip()])
+    main(sys.argv[1], [line.rstrip("\n").encode() for line in sys.stdin if line.strip()],
+         (sys.argv[2] if len(sys.argv) > 2 else "invite").encode())
