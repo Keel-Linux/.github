@@ -36,6 +36,9 @@
 #                       a pass), e.g. "ssh -o BatchMode=yes root@pve1";
 #                       KC_PVE_<SITE> for a node on that site (KC_PVE_BR2)
 #   KC_CT_OPTS          more pct create options: storage, network, memory
+#   KC_IMAGE_<NODE>     the image of that node (KC_IMAGE_WITNESS), in place
+#                       of the contract's; a node with the contract of
+#                       another appliance needs one of the two
 #   KC_VM_OPTS          more qm create options: the network, for example
 #                       "--net0 virtio,bridge=vmbr0,tag=88"
 #   KC_VM_STORAGE       the storage of the VM's disk (local-lvm)

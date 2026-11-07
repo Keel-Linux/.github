@@ -50,6 +50,7 @@ node_use() {
     if [ -n "$contract" ] && [ "$contract" != - ]; then
         KC_TSV=$(node_tsv "$contract")
     fi
+    node_image "$name"
     if [ "$KC_IMAGE" = - ]; then
         if [ "$kind" = vm ]; then KC_IMAGE="$KC_ISO"; else KC_IMAGE="$KC_TEMPLATE"; fi
     fi
@@ -59,6 +60,33 @@ node_use() {
     # read by the console and the VM driver
     # shellcheck disable=SC2034
     KC_LOG="$KC_DIR/console.log"
+}
+
+# node_image NAME: KC_IMAGE_<NAME> (upper case, "-" as "_") in place of
+# the node's image, when it is set. The image of a node of another
+# appliance (the Keel Core witness) is a new build for each release, so
+# the contract in the appliance repository does not name it.
+node_image() {
+    local var="KC_IMAGE_${1^^}"
+    var="${var//-/_}"
+    if [ -n "${!var:-}" ]; then
+        KC_IMAGE="${!var}"
+    fi
+}
+
+# node_images: stop when a node of another appliance has no image: it
+# would be made from --template or --iso, the image of this appliance.
+node_images() {
+    local row name image contract KC_IMAGE
+    for row in "${KC_NODES[@]}"; do
+        IFS=$'\t' read -r name _ _ image _ contract <<< "$row"
+        KC_IMAGE="$image"
+        node_image "$name"
+        if [ "$contract" != - ] && [ "$KC_IMAGE" = - ]; then
+            local var="KC_IMAGE_${name^^}"
+            die 2 "node $name has the contract of another appliance and no image: set ${var//-/_}"
+        fi
+    done
 }
 
 # node_wants NAME: the highest invite number the node's answers type, and
@@ -165,6 +193,7 @@ pass_nodes() {
     KC_BASE_VMID="$KC_VMID"
     mapfile -t KC_NODES < <(node_rows)
     [ "${#KC_NODES[@]}" -gt 0 ] || die 2 "the contract has no node of mode $KC_PASS"
+    node_images
     node_free
     for i in "${!KC_NODES[@]}"; do
         name="${KC_NODES[$i]%%$'\t'*}"
@@ -215,10 +244,15 @@ on_nodes() {
 # output matches MATCH, and the check passes when COUNT nodes pass (all of
 # them when COUNT is empty).
 cross_checks() {
-    local row id at run match count secret same i passed total value rows targets
+    local row id at run match count secret same modes i passed total value rows targets
     mapfile -t rows < <(grep $'^cross\t' <<< "$KC_TSV" | cut -f2-)
     for row in "${rows[@]}"; do
-        IFS=$'\t' read -r id at run match count secret same <<< "$row"
+        IFS=$'\t' read -r id at run match count secret same modes <<< "$row"
+        # a check of other modes only: the witness of cloud advanced, for
+        # example, is not a node of cloud simple
+        if [ "${modes:--}" != - ] && [[ ",$modes," != *",$KC_PASS,"* ]]; then
+            continue
+        fi
         if [ "$same" = same ]; then
             cross_same "$id" "$at" "$run"
             continue

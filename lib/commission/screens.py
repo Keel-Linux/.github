@@ -21,11 +21,13 @@ The lines they add to `contract.py tsv`, fields separated by a tab:
                                           GROUP 1 when REGEX has a group
     wait       PROMPT                     a screen that waits for another node:
                                           no key while it is up
-    cross      ID  AT  RUN  MATCH  COUNT  SECRET  SAME
+    cross      ID  AT  RUN  MATCH  COUNT  SECRET  SAME  MODES
                                           a check across the nodes ("-"
                                           for an empty field); SAME "same"
                                           when every node must print the
-                                          same output
+                                          same output; MODES the cloud
+                                          modes it runs in, with commas,
+                                          "-" for every mode
 
 KEYS is what the operator types: letters, digits and @._+-:/=~ as they are,
 and the names in braces for the other keys, for example "n", "{ret}" or
@@ -345,6 +347,7 @@ def check_cloud(doc, secrets, errors):
     if not isinstance(checks, list):
         errors.append("cloud.checks is not a list")
         checks = []
+    seen = set()
     for item in checks:
         if not isinstance(item, dict):
             errors.append("a cloud check is not a mapping")
@@ -378,10 +381,29 @@ def check_cloud(doc, secrets, errors):
             errors.append("cloud check %s: secret %r is not declared" % (cid, secret))
         if "\t" in match:
             errors.append("cloud check %s: match has a tab" % cid)
+        modes = check_modes(item, cid, seen, errors)
         # "-" for an empty field: bash's read joins two tabs into one
         rows.append(["cross", cid, on, run, match or "-", str(count) or "-", secret or "-",
-                     "same" if same is True else "-"])
+                     "same" if same is True else "-", ",".join(modes) or "-"])
     return rows, captures
+
+
+def check_modes(item, cid, seen, errors):
+    """The cloud modes a check runs in, [] for all of them. One contract
+    holds the checks of cloud simple and cloud advanced (decision 0076):
+    a check of the witness, or of three voters, is wrong on a pair. One id
+    may be given once in each mode, so a record names a check the same way
+    in both."""
+    modes = item.get("modes", [])
+    if not isinstance(modes, list) or not all(m in SHAPE for m in modes):
+        errors.append("cloud check %s: modes %r is not a list of %s"
+                      % (cid, modes, ", ".join(sorted(SHAPE))))
+        modes = []
+    for mode in modes or sorted(SHAPE):
+        if (mode, cid) in seen:
+            errors.append("cloud check %s is declared twice for %s" % (cid, mode))
+        seen.add((mode, cid))
+    return modes
 
 
 def check_node(item, secrets, captures, errors):

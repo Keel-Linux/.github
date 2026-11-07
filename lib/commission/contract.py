@@ -229,9 +229,9 @@ def tsv(path):
 def contract_rows(path, nested):
     """The tsv rows of the contract at PATH and its errors. A node may name
     the contract of another appliance (the Keel Core witness of a cloud
-    advanced set, decision 0076): that contract is checked too, it must
-    have no nodes of its own (NESTED), and its secrets must be secrets of
-    this one, which the runner makes once for the whole pass."""
+    advanced set, decision 0076): that contract is checked too (NESTED),
+    the contracts its own nodes name are not, and its secrets must be
+    secrets of this one, which the runner makes once for the whole pass."""
     doc = load(path)
     errors = []
     if doc.get("contract") != 1:
@@ -247,10 +247,12 @@ def contract_rows(path, nested):
     rows += screens.rows(doc, secrets, errors)
     if "instance" in doc and not isinstance(doc["instance"], dict):
         errors.append("instance is not a mapping")
-    if nested and doc.get("nodes"):
-        errors.append("a contract that a node names has nodes of its own")
     for row in rows:
-        if row[0] == "node" and row[7] != "-":
+        # the nodes of a contract that a node names are its own cloud
+        # passes: the node takes only its questions, proofs, checks and
+        # screenshots (node_tsv), so keel-core's own contract is the
+        # contract of the witness
+        if row[0] == "node" and row[7] != "-" and not nested:
             row[7] = node_contract(path, row[1], row[7], secrets, errors)
     return rows, errors
 

@@ -819,16 +819,112 @@ EOF
 @test "cloud: the contract a node names is checked" {
     cloud_contract
     witness_contract
-    printf 'nodes:\n  - {name: x, site: br1, mode: simple}\n' >> "$TMP/core.yaml"
+    # keel-core's contract has nodes of its own, for its own cloud passes:
+    # they are checked, and the contract one of them names is not read
+    printf 'nodes:\n  - {name: x, site: br1, mode: simple, contract: never-read.yaml}\n  - {name: Bad, site: br1, mode: simple}\n' >> "$TMP/core.yaml"
     sed -i 's/^secrets: \[root\]$/secrets: [root, other]/' "$TMP/core.yaml"
     printf '  - {name: six, site: br2, mode: simple, contract: nope.yaml}\n  - {name: seven, site: br2, mode: simple, contract: "a b"}\n' >> "$TMP/c.yaml"
     run "$KC" --check "$TMP/c.yaml"
     [ "$status" -eq 2 ]
-    for want in "node three: core.yaml: a contract that a node names has nodes of its own" \
+    [[ "$output" != *"never-read.yaml"* ]]
+    [[ "$output" != *"has nodes of its own"* ]]
+    for want in "node three: core.yaml: node name 'Bad' is not a lower case name" \
         "node three: contract core.yaml has secrets this one does not declare: other" \
         "node six: contract nope.yaml is not a file" "node seven: contract 'a b' is not a file name"; do
         [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
     done
+}
+
+@test "cloud: the witness image comes from KC_IMAGE_<NODE>, and a witness without one stops" {
+    cloud_contract
+    witness_contract
+    sed -i '/image: local:vztmpl\/core.tar.zst/d' "$TMP/c.yaml"
+    good_machine
+    run "$KC" --contract "$TMP/c.yaml" --template local:vztmpl/t.tar.zst \
+        --vmid 9001 --pass cloud_advanced --site br1 --out "$OUT"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"node three has the contract of another appliance and no image: set KC_IMAGE_THREE"* ]]
+    run ! grep -q 'pct create' "$LOG"
+    # the variable names a node with "-" in its name with "_"
+    KC_LIB="$LIB" KC_IMAGE_ADV_WITNESS=local:vztmpl/w.tar.zst run bash -c \
+        '. "$KC_LIB/nodes.sh"; KC_IMAGE=-; node_image adv-witness; echo "$KC_IMAGE"'
+    [ "$output" = local:vztmpl/w.tar.zst ]
+    answering_expect
+    printf 'nginx\ncrowdsec\n' > "$STATE/active"
+    printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:FIRSTINVITE\nKC_INVITE keel1:SECONDINVITE\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN root_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9003"
+    KC_IMAGE_THREE=local:vztmpl/core-new.tar.zst run "$KC" --contract "$TMP/c.yaml" \
+        --template local:vztmpl/t.tar.zst --vmid 9001 --pass cloud_advanced --site br1 --out "$OUT"
+    echo "$output"
+    grep -q 'pct create 9003 local:vztmpl/core-new.tar.zst' "$LOG"
+    grep -q 'pct create 9001 local:vztmpl/t.tar.zst' "$LOG"
+}
+
+@test "cloud: a check runs only in the modes it names" {
+    cloud_contract
+    witness_contract
+    python3 - "$TMP/c.yaml" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("  checks:\n", "  checks:\n"
+    "    - {id: witness-only, at: witness, run: 'keel witness', modes: [cloud_advanced]}\n"
+    "    - {id: seeded, at: 'primary,replica', run: 'keel seed', same: true, modes: [cloud_advanced]}\n"
+    "    - {id: peers, at: all, run: 'keel peers', match: 'peers: 1', modes: [cloud_simple]}\n"
+    "    - {id: peers, at: all, run: 'keel peers', match: 'peers: 2', modes: [cloud_advanced]}\n", 1)
+open(p, "w").write(s)
+PY2
+    run python3 -I "$CONTRACT_PY" tsv "$TMP/c.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'cross\twitness-only\twitness\tkeel witness\t-\t-\t-\t-\tcloud_advanced'* ]]
+    [[ "$output" == *$'cross\tpeers\tall\tkeel peers\tpeers: 1\t-\t-\t-\tcloud_simple'* ]]
+    # a check with no modes is for every mode: the old contracts stay valid
+    [[ "$output" == *$'cross\tholder\tall\tkeel vip status\tholder\t1\t-\t-\t-'* ]]
+    good_machine
+    answering_expect
+    printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    cat > "$GBIN/keel" <<'SH'
+#!/bin/bash
+case "$1" in
+    peers) echo "peers: 1" ;;
+    *) cat "$STATE/keel.$KC_FAKE_VMID" 2>/dev/null ;;
+esac
+SH
+    chmod +x "$GBIN/keel"
+    printf 'vip fd00::ffff:1: holder\n3 voter(s)\n' > "$STATE/keel.9001"
+    run_cloud
+    echo "$output"
+    [[ "$output" == *"pass  cross.peers                              2 of 2 nodes (all)"* ]]
+    [[ "$output" == *"pass  cross.holder"* ]]
+    # the checks of cloud advanced, a same check too, are not run on a pair
+    [[ "$output" != *"cross.witness-only"* ]]
+    [[ "$output" != *"cross.seeded"* ]]
+    [ "$(grep -c 'cross.peers' "$OUT/cloud_simple/record.tsv")" -eq 1 ]
+}
+
+@test "cloud: the modes of a check say what is wrong" {
+    cloud_contract
+    python3 - "$TMP/c.yaml" <<'PY2'
+import sys
+p = sys.argv[1]; s = open(p).read()
+s = s.replace("  checks:\n", "  checks:\n"
+    "    - {id: m1, at: all, run: 'true', modes: [simple]}\n"
+    "    - {id: m2, at: all, run: 'true', modes: cloud_simple}\n"
+    "    - {id: m3, at: all, run: 'true', modes: [cloud_advanced]}\n"
+    "    - {id: m3, at: all, run: 'true', modes: [cloud_advanced]}\n"
+    "    - {id: holder, at: all, run: 'true', modes: [cloud_simple]}\n", 1)
+open(p, "w").write(s)
+PY2
+    run "$KC" --check "$TMP/c.yaml"
+    [ "$status" -eq 2 ]
+    for want in "cloud check m1: modes ['simple'] is not a list of cloud_advanced, cloud_simple" \
+        "cloud check m2: modes 'cloud_simple' is not a list of cloud_advanced, cloud_simple" \
+        "cloud check m3 is declared twice for cloud_advanced" \
+        "cloud check holder is declared twice for cloud_simple"; do
+        [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
+    done
+    [[ "$output" != *"cloud check holder is declared twice for cloud_advanced"* ]]
 }
 
 @test "cloud: a check that wants the same output on several nodes" {
@@ -845,8 +941,8 @@ s = s.replace("  checks:\n", "  checks:\n    - {id: seeded, at: 'primary,replica
 open(p, "w").write(s)
 PY2
     run python3 -I "$CONTRACT_PY" tsv "$TMP/c.yaml"
-    [[ "$output" == *$'cross\tseeded\tprimary,replica\tkeel seed\t-\t-\t-\tsame'* ]]
-    [[ "$output" == *$'cross\tholder\tall\tkeel vip status\tholder\t1\t-\t-'* ]]
+    [[ "$output" == *$'cross\tseeded\tprimary,replica\tkeel seed\t-\t-\t-\tsame\t-'* ]]
+    [[ "$output" == *$'cross\tholder\tall\tkeel vip status\tholder\t1\t-\t-\t-'* ]]
     printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
     printf 'KC_HINT\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
     # keel of the guest: "seed" the same on both, "node" its own vmid, "none" nothing
