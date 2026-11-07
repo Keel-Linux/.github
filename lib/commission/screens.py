@@ -21,13 +21,16 @@ The lines they add to `contract.py tsv`, fields separated by a tab:
                                           GROUP 1 when REGEX has a group
     wait       PROMPT                     a screen that waits for another node:
                                           no key while it is up
-    cross      ID  AT  RUN  MATCH  COUNT  SECRET  SAME  MODES
+    cross      ID  AT  RUN  MATCH  COUNT  SECRET  SAME  MODES  ALERT  WITHIN
                                           a check across the nodes ("-"
                                           for an empty field); SAME "same"
                                           when every node must print the
                                           same output; MODES the cloud
                                           modes it runs in, with commas,
-                                          "-" for every mode
+                                          "-" for every mode; ALERT a text
+                                          that must come on the alert topic
+                                          of the pass (KC_NTFY_URL) within
+                                          WITHIN seconds after RUN
 
 KEYS is what the operator types: letters, digits and @._+-:/=~ as they are,
 and the names in braces for the other keys, for example "n", "{ret}" or
@@ -383,9 +386,31 @@ def check_cloud(doc, secrets, errors):
             errors.append("cloud check %s: match has a tab" % cid)
         modes = check_modes(item, cid, seen, errors)
         # "-" for an empty field: bash's read joins two tabs into one
+        alert, within = check_alert(item, cid, errors)
         rows.append(["cross", cid, on, run, match or "-", str(count) or "-", secret or "-",
-                     "same" if same is True else "-", ",".join(modes) or "-"])
+                     "same" if same is True else "-", ",".join(modes) or "-", alert, within])
     return rows, captures
+
+
+def check_alert(item, cid, errors):
+    """ALERT and WITHIN of a check: the text of an alert that must come on
+    the topic of the pass after its run, and the seconds it waits for it
+    (90 when not given); "-" and "-" for a check with no alert. The alert
+    of the PostgreSQL fallback came 36 s after the standby stopped (BR1 and
+    BR2, 2026-11-07)."""
+    alert = item.get("alert", "")
+    if alert == "":
+        if "within" in item:
+            errors.append("cloud check %s: within without an alert" % cid)
+        return "-", "-"
+    if not isinstance(alert, str) or not PROMPT.match(alert):
+        errors.append("cloud check %s: alert %r is not usable" % (cid, alert))
+        return "-", "-"
+    within = item.get("within", 90)
+    if not isinstance(within, int) or isinstance(within, bool) or not 1 <= within <= 600:
+        errors.append("cloud check %s: within %r is not 1 to 600 seconds" % (cid, within))
+        return "-", "-"
+    return alert, str(within)
 
 
 def check_modes(item, cid, seen, errors):

@@ -1077,3 +1077,136 @@ EOF
     [ -s "$TMP/w/web-01-wrong-after.png" ]
     [ -s "$TMP/w/web-02-again-after.png" ]
 }
+
+# --- the alerts of a cloud pass (keel-ntfy, decision 0063) ---------------
+
+# ntfy_env: a test topic and its two token files, and a fake curl that
+# answers the topic from STATE/topic and logs its arguments
+ntfy_env() {
+    printf 'tk_PUBLISHSECRET123\n' > "$TMP/publish"
+    printf 'Authorization: Bearer tk_READSECRET456\n' > "$TMP/read"
+    chmod 600 "$TMP/publish" "$TMP/read"
+    export KC_NTFY_URL=https://ntfy.test/kc-test KC_NTFY_TOKEN_FILE="$TMP/publish" \
+        KC_NTFY_READ_FILE="$TMP/read" KC_CURL="$FAKES/curl" KC_ALERT_POLL=0
+    cat > "$FAKES/curl" <<'SH'
+#!/bin/bash
+printf 'curl %s\n' "$*" >> "$LOG"
+cat "$STATE/topic" 2>/dev/null
+SH
+    chmod +x "$FAKES/curl"
+    mkdir -p "$GUEST/etc/keel"
+    printf 'version: 1\ninstallation:\n  mode: cloud_simple\n' > "$GUEST/etc/keel/instance.yaml"
+}
+
+alert_contract() {
+    cloud_contract
+    sed -i "/^    - {id: voters/a\\    - {id: fell-back, at: replica, run: 'echo stopped', alert: fell back to asynchronous, within: 90}" "$TMP/c.yaml"
+}
+
+cloud_screens() {
+    printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    printf 'vip fd00::ffff:1: holder\n3 voter(s)\n' > "$STATE/keel.9001"
+    printf 'vip fd00::ffff:1: follower\n' > "$STATE/keel.9002"
+}
+
+@test "contract: an alert check names the text of the alert and the seconds it waits" {
+    alert_contract
+    run python3 "$CONTRACT_PY" tsv "$TMP/c.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'cross\tfell-back\treplica\techo stopped\t-\t-\t-\t-\t-\tfell back to asynchronous\t90'* ]]
+    sed -i 's/within: 90/within: 900/' "$TMP/c.yaml"
+    run python3 "$CONTRACT_PY" tsv "$TMP/c.yaml"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"fell-back: within 900 is not 1 to 600 seconds"* ]]
+}
+
+@test "cloud: each node sends its alerts to a topic of the pass, and the token stays off every record" {
+    alert_contract
+    good_machine
+    answering_expect
+    ntfy_env
+    printf '#!/bin/bash\nexec bash -c "$*"\n' > "$FAKES/pve2"
+    chmod +x "$FAKES/pve2"
+    export KC_PVE_BR2="$FAKES/pve2" KC_BOOT_TIMEOUT=30
+    cloud_screens
+    printf '{"event":"message","message":"[kc9001] the primary'"'"'s commits fell back to asynchronous"}\n' > "$STATE/topic"
+    run_cloud
+    echo "$output"
+    [[ "$output" == *"pass  one:monitor.ntfy"* ]]
+    [[ "$output" == *"pass  two:monitor.ntfy"* ]]
+    [[ "$output" == *"pass  cross.fell-back"*"fell back to asynchronous"* ]]
+    # the node's spec names the topic of this pass and the token file
+    grep -q 'url: https://ntfy.test/kc-test-9001-' "$GUEST/etc/keel/instance.yaml"
+    grep -q 'file: /etc/keel/secrets/kc_ntfy_token' "$GUEST/etc/keel/instance.yaml"
+    grep -qx 'tk_PUBLISHSECRET123' "$GUEST/etc/keel/secrets/kc_ntfy_token"
+    [ "$(stat -c %a "$GUEST/etc/keel/secrets")" = 700 ]
+    [ "$(stat -c %a "$GUEST/etc/keel/secrets/kc_ntfy_token")" = 600 ]
+    # the read header goes to curl as a file, never on its command line
+    grep -q "curl .*-H @$TMP/read .*https://ntfy.test/kc-test-9001-[0-9]*/json?poll=1" "$LOG"
+    run grep -rl -e PUBLISHSECRET -e READSECRET "$OUT" "$LOG"
+    [ "$status" -ne 0 ]
+}
+
+@test "cloud: an alert that does not come within its seconds fails, and so does a pass with no topic" {
+    alert_contract
+    good_machine
+    answering_expect
+    ntfy_env
+    printf '#!/bin/bash\nexec bash -c "$*"\n' > "$FAKES/pve2"
+    chmod +x "$FAKES/pve2"
+    export KC_PVE_BR2="$FAKES/pve2" KC_BOOT_TIMEOUT=30
+    cloud_screens
+    printf '{"event":"message","message":"the primary'"'"'s commits wait for the standby"}\n' > "$STATE/topic"
+    sed -i 's/within: 90/within: 2/' "$TMP/c.yaml"
+    run_cloud
+    echo "$output"
+    [[ "$output" == *"fail  cross.fell-back"*"no alert 'fell back to asynchronous' on the topic within 2 s"* ]]
+    # with no header that may read the topic, the check fails at once: the
+    # servers of decision 0063 let no one read without one
+    rm -rf "$OUT"; : > "$LOG"
+    unset KC_NTFY_READ_FILE
+    run_cloud
+    echo "$output"
+    [[ "$output" == *"fail  cross.fell-back"*"KC_NTFY_READ_FILE is not set"* ]]
+    run ! grep -q '^curl ' "$LOG"
+    rm -rf "$OUT"
+    unset KC_NTFY_URL
+    run_cloud
+    echo "$output"
+    [[ "$output" == *"fail  cross.fell-back"*"KC_NTFY_URL is not set"* ]]
+    [[ "$output" != *"monitor.ntfy"* ]]
+}
+
+@test "cloud: a token file that anybody but its owner reads is refused" {
+    alert_contract
+    ntfy_env
+    chmod 644 "$TMP/publish"
+    run_cloud
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"KC_NTFY_TOKEN_FILE"*"mode 600"* ]]
+}
+
+@test "a node of a site is made with the nameserver of that site" {
+    small_contract
+    good_machine
+    answering_expect
+    export KC_NAMESERVER_BR2='2606:4700:4700::1111 2001:4860:4860::8888'
+    run "$KC" --contract "$TMP/c.yaml" --template local:vztmpl/t.tar.zst --vmid 9001 \
+        --pass lxc-interactive --site br2 --out "$OUT"
+    grep -q "pct create 9001 .*--nameserver '2606:4700:4700::1111 2001:4860:4860::8888'" "$LOG"
+    : > "$LOG"; rm -rf "$OUT" "$STATE/exists"
+    run "$KC" --contract "$TMP/c.yaml" --template local:vztmpl/t.tar.zst --vmid 9001 \
+        --pass lxc-interactive --site br1 --out "$OUT"
+    grep -q 'pct create 9001' "$LOG"
+    run ! grep -q -- '--nameserver' "$LOG"
+    # a bad value of any site stops the pass before a machine is made: a
+    # cloud pass has nodes on more than one site
+    export KC_NAMESERVER_BR2='1.1.1.1; reboot'
+    : > "$LOG"; rm -rf "$OUT" "$STATE/exists"
+    run "$KC" --contract "$TMP/c.yaml" --template local:vztmpl/t.tar.zst --vmid 9001 \
+        --pass lxc-interactive --site br1 --out "$OUT"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"KC_NAMESERVER_BR2"*"is not a list of addresses"* ]]
+    run ! grep -q 'pct create' "$LOG"
+}

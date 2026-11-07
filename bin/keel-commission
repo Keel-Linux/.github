@@ -53,6 +53,20 @@
 #   KC_CONSOLE_STEPS    Enters before the console is stuck (90)
 #   KC_TUNNEL           the command that opens the SOCKS tunnel of the web
 #                       screenshots with -N -D PORT (KC_PVE)
+#   KC_NAMESERVER       the resolvers of a container, addresses with spaces
+#                       (KC_NAMESERVER_<SITE> for a site); none: the PVE host's.
+#                       A site with no IPv4 for its containers (the test net
+#                       of BR1) needs IPv6 resolvers here, for example
+#                       KC_NAMESERVER_BR1="2606:4700:4700::1111 2001:4860:4860::8888"
+#   KC_NTFY_URL         a cloud pass: the ntfy topic URL its alerts go to; the
+#                       pass appends "-VMID-EPOCH", so it reads only its own
+#   KC_NTFY_TOKEN_FILE  the publish token of that server (mode 600), which
+#                       each node gets as a secret file; never printed
+#   KC_NTFY_READ_FILE   a header line that may read the topic, for example
+#                       "Authorization: Bearer tk_..." (mode 600), for the
+#                       checks with an alert
+#   KC_CURL             the curl that reads the topic (curl)
+#   KC_ALERT_POLL       seconds between two reads of the topic (5)
 #
 # Exit: 0 every check passed, 1 a check failed, 2 usage or an invalid
 # contract, 3 the PVE host did not make or start the machine, 4 the vmid
@@ -158,6 +172,33 @@ parse_args() {
     [ -n "$KC_IMAGE" ] || die 2 "--pass $KC_PASS needs $([ "$KC_KIND" = vm ] && echo --iso || echo --template)"
     site_env "$KC_SITE"
     [ -n "${KC_PVE:-}" ] || die 2 "KC_PVE is not set: nothing reaches the PVE host"
+    ntfy_env
+    nameserver_env
+}
+
+# nameserver_env: each KC_NAMESERVER value is a list of addresses, checked
+# before any machine is made. The value goes into the pct command line on
+# the PVE host.
+nameserver_env() {
+    local var
+    for var in $(compgen -v KC_NAMESERVER); do
+        [[ ${!var} =~ ^[0-9A-Fa-f:.\ ]*$ ]] || die 2 "$var '${!var}' is not a list of addresses"
+    done
+}
+
+# ntfy_env: the alert topic of a cloud pass, checked before any machine is
+# made. A token file that others may read is refused: the token lets
+# anybody write to the topic.
+ntfy_env() {
+    local f
+    [ -n "${KC_NTFY_URL:-}" ] || return 0
+    [[ $KC_NTFY_URL =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9_-]{1,40}$ ]] \
+        || die 2 "KC_NTFY_URL '$KC_NTFY_URL' is not https://HOST/TOPIC"
+    for f in KC_NTFY_TOKEN_FILE KC_NTFY_READ_FILE; do
+        [ -n "${!f:-}" ] || { [ "$f" = KC_NTFY_READ_FILE ] && continue; die 2 "$f is not set"; }
+        [ -s "${!f}" ] || die 2 "$f '${!f}' is no file with a value"
+        [[ $(stat -c %a "${!f}") =~ ^[46]00$ ]] || die 2 "$f '${!f}' may be read by others: it must be mode 600 or 400"
+    done
 }
 
 load_contract() {
