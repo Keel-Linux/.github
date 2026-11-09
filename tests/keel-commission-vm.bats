@@ -1043,12 +1043,35 @@ EOF
     # two VIP holders, and no voters on the primary
     [[ "$output" == *"fail  cross.holder                             2 of 2 nodes (all), wants 1"* ]]
     [[ "$output" == *"fail  cross.voters                             0 of 1 nodes (primary), wants 1"* ]]
+    # what each node that failed said, and its failed units, follow the
+    # fail (release A, 2026-11-09: no-failed-units said only "0 of 2")
+    [[ "$output" == *"note  cross.voters                             one said: vip x: holder; failed units: none"* ]]
+    [[ "$output" == *"note  cross.holder                             one said: vip x: holder; failed units: none"* ]]
+    grep -qx $'note\tcross.voters\tone said: vip x: holder; failed units: none' "$OUT/cloud_simple/record.tsv"
     run grep -c 'pct destroy' "$LOG"
     [ "$output" = 0 ]
     run "$KC" --contract "$TMP/c.yaml" --template local:vztmpl/t.tar.zst \
         --vmid 9001 --pass cloud_advanced --site br1 --out "$OUT"
     [ "$status" -eq 2 ]
     [[ "$output" == *"no node of mode cloud_advanced"* ]]
+}
+
+@test "cloud: a check that fails names the failed units of each node that failed it" {
+    cloud_contract
+    good_machine
+    sed -i "s/^    - {id: voters.*/&\n    - {id: no-failed-units, at: all, run: 'systemctl --failed --no-legend --plain | wc -l', match: '^0\$'}/" "$TMP/c.yaml"
+    export KC_BOOT_TIMEOUT=2 KC_POLL=0
+    printf 'KC_HINT\nKC_DONE\n' > "$STATE/screen"
+    printf 'vip x: holder\n' > "$STATE/keel.9001"
+    printf 'keel-database-dump.service loaded failed failed keel database: the dump on the standby\n' > "$STATE/failed-units"
+    run_cloud
+    echo "$output"
+    [[ "$output" == *"fail  cross.no-failed-units                    0 of 2 nodes (all), wants 2"* ]]
+    [[ "$output" == *"note  cross.no-failed-units                    one said: 1; failed units: keel-database-dump.service"* ]]
+    [[ "$output" == *"note  cross.no-failed-units                    two said: 1; failed units: keel-database-dump.service"* ]]
+    # a note is no failed check of its own
+    [[ "$output" == *"FAIL, 4 checks failed"* ]] || [[ "$output" == *"checks failed"* ]]
+    [ "$(grep -c $'^fail\tcross.no-failed-units' "$OUT/cloud_simple/record.tsv")" -eq 1 ]
 }
 
 @test "cloud: a node vmid in use is never touched, and a VM node" {
