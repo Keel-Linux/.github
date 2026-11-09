@@ -284,7 +284,7 @@ on_nodes() {
 # output matches MATCH, and the check passes when COUNT nodes pass (all of
 # them when COUNT is empty).
 cross_checks() {
-    local row id at run match count secret same modes alert within i passed total value rows targets since
+    local row id at run match count secret same modes alert within i passed total value rows targets since said note notes
     mapfile -t rows < <(grep $'^cross\t' <<< "$KC_TSV" | cut -f2-)
     for row in "${rows[@]}"; do
         IFS=$'\t' read -r id at run match count secret same modes alert within <<< "$row"
@@ -304,13 +304,21 @@ cross_checks() {
         mapfile -t targets < <(on_nodes "$at")
         total="${#targets[@]}"
         since=$(date +%s)
+        notes=()
         for i in "${targets[@]}"; do
-            if ( node_use "$i"; cross_one "$value" "$run" "$match" ); then
+            if said=$( node_use "$i"; cross_one "$value" "$run" "$match" ); then
                 passed=$((passed + 1))
             fi
+            notes+=("$said")
         done
         if [ "$total" -eq 0 ] || [ "$passed" -ne "${count:-$total}" ]; then
             record fail "cross.$id" "$passed of $total nodes ($at), wants ${count:-$total}"
+            # what each node said, and its failed units, so the record
+            # names the cause (release A, 2026-11-09: no-failed-units
+            # said only "0 of 2 nodes")
+            for note in "${!targets[@]}"; do
+                record note "cross.$id" "$(cross_note "${targets[$note]}" "${notes[$note]}" "$value")"
+            done
         elif [ "${alert:--}" != - ]; then
             alert_wait "$id" "$alert" "$within" "$since"
         else
@@ -412,11 +420,27 @@ cross_same() {
     fi
 }
 
-# cross_one SECRET RUN MATCH: run RUN in the node with VIP and SECRET set.
+# cross_one SECRET RUN MATCH: run RUN in the node with VIP and SECRET set;
+# what it printed goes to the standard output.
 cross_one() {
-    local out
-    out=$({ printf 'export SECRET=%q VIP=%q\n' "$1" "${KC_VIP:-}"; printf '%s\n' "$2"; } | guest_sh 2>/dev/null) || return 1
+    local out code=0
+    out=$({ printf 'export SECRET=%q VIP=%q\n' "$1" "${KC_VIP:-}"; printf '%s\n' "$2"; } | guest_sh 2>/dev/null) || code=1
+    printf '%s' "$out"
+    [ "$code" -eq 0 ] || return 1
     [ -z "$3" ] || grep -qE -- "$3" <<< "$out"
+}
+
+# cross_note INDEX SAID SECRET: one line for the record of a check that
+# failed: the node, the first line it printed (the secret masked, 120
+# characters at most), and the units systemd lists as failed there.
+cross_note() {
+    local name first units
+    IFS=$'\t' read -r name _ <<< "${KC_NODES[$1]}"
+    first=$(head -n 1 <<< "$2")
+    [ -z "$3" ] || first="${first//"$3"/(the secret)}"
+    first="${first:0:120}"
+    units=$( node_use "$1"; printf 'systemctl --failed --no-legend --plain 2>/dev/null\n' | guest_sh 2>/dev/null | awk '{print $1}' | paste -sd ' ' -)
+    printf '%s said: %s; failed units: %s' "$name" "${first:-nothing}" "${units:-none}"
 }
 
 # nodes_destroy: remove every node, unless --keep was given.

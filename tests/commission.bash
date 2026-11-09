@@ -182,6 +182,11 @@ EOF
     # the guest's commands
     cat > "$GBIN/systemctl" <<'EOF'
 #!/bin/bash
+# --failed: the failed units the case wrote, $STATE/failed-units
+if [[ " $* " == *" --failed "* ]]; then
+    cat "$STATE/failed-units" 2>/dev/null
+    exit 0
+fi
 grep -qx "${*: -1}" "$STATE/active" 2>/dev/null
 EOF
     cat > "$GBIN/mysql" <<'EOF'
