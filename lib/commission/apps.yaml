@@ -56,3 +56,21 @@ apps:
     version: Odoo 18.0
     file: conf.d/main
     match: ODOO_TAG=snapshot-18.0-
+  mariadb:
+    repo: keel-mariadb
+    name: Keel MariaDB
+    version: MariaDB 11.8
+    file: changelog
+    match: MariaDB 11.8 from Debian 13
+  redis:
+    repo: keel-redis
+    name: Keel Redis
+    version: Redis 8.0
+    file: changelog
+    match: Redis 8.0 from Debian 13
+  ntfy:
+    repo: keel-ntfy
+    name: Keel ntfy
+    version: ntfy 2.11
+    file: README.rst
+    match: Debian 13, version 2.11
