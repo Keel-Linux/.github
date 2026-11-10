@@ -1,14 +1,17 @@
 """The HTML of an application page (decision 0077), for pages.py.
 
 render() takes the page that pages.py read, copies the pictures it shows
-to OUT/img/ and returns index.html. Every text is escaped, and every link
-is relative, so the page works from a file and under /apps/NAME/.
+to OUT/img/ and returns index.html. Every text is escaped. A link to a
+picture is relative, so the page works from a file and under /apps/NAME/,
+and a link to the site is absolute (pagesite.py).
 """
 
 import html
 import os
 import re
 import shutil
+
+import pagesite
 
 TITLES = {"simple": "Simple: one node",
           "cloud_simple": "Cloud simple: two nodes, failover by hand",
@@ -102,9 +105,9 @@ def guide(one, pictures, frame):
         for node in columns:
             row = node["rows"][step] if step < len(node["rows"]) else None
             cells.append("<td>%s</td>" % (cell(node, row, "%s/%s" % (key, node["name"]), pictures, frame)
-                                          if row else "&#8212;"))
+                                          if row else ""))
         body.append('<tr><th scope="row">%d</th>%s</tr>' % (step + 1, "".join(cells)))
-    return ('<div class="guide cols-%d"><table><thead><tr><th>Step</th>%s</tr></thead><tbody>%s'
+    return ('<div class="mode-guide cols-%d"><table><thead><tr><th>Step</th>%s</tr></thead><tbody>%s'
             "</tbody></table></div>" % (len(columns), head, "".join(body)))
 
 
@@ -180,26 +183,22 @@ def results(passes):
         name = PASSES.get(one["name"], one["name"]) if one["mode"] == "simple" else TITLES[one["mode"]]
         where = ", ".join(("%s %s" % (node["meta"].get("role", ""), node["meta"].get("site", one["site"]))).strip()
                           for node in one["nodes"])
-        rows.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%d of %d</td><td><code>%s</code></td></tr>" % (
-            esc(name), esc(where),
-            esc(one["meta"].get("date", "")), count, count, esc(one["meta"].get("contract", "")[:16])))
-    return ("<h2>Commissioning</h2><p>Every pass below passed every check (decision 0075). A page never"
-            " shows an image that did not pass.</p><table><thead><tr><th>Pass</th><th>Nodes</th><th>Date</th>"
-            "<th>Checks passed</th><th>Contract</th></tr></thead><tbody>%s</tbody></table>" % "".join(rows))
+        rows.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%d of %d</td></tr>" % (
+            esc(name), esc(where), esc(one["meta"].get("date", "")), count, count))
+    return ('<h2 id="commissioning">Commissioning</h2><p>%s</p><p>Every pass below passed every check'
+            " (decision 0075). A page never shows an image that did not pass.</p><table><thead><tr><th>Pass</th>"
+            "<th>Nodes</th><th>Date</th><th>Checks passed</th></tr></thead><tbody>%s</tbody></table>"
+            % (esc(summary(passes)), "".join(rows)))
 
 
-def install(page):
-    parts = ["<h2>Install</h2>"]
-    if page["template"]:
-        parts.append("<h3>LXC template, for Proxmox VE</h3><p><code>%s</code></p><p class=\"sha\">sha256 "
-                     "<code>%s</code></p><p>Make a container from the template. At the first login on the console,"
-                     " run <code>keel-init</code> and choose the installation mode.</p>" % (
-                         esc(page["template"][0]), esc(page["template"][1])))
-    if page["iso"]:
-        parts.append("<h3>ISO, for a virtual or a real machine</h3><p><code>%s</code></p><p class=\"sha\">sha256 "
-                     "<code>%s</code></p><p>Boot the ISO and install. The first boot of the installed system asks"
-                     " the same questions as the template.</p>" % (esc(page["iso"][0]), esc(page["iso"][1])))
-    return "".join(parts)
+def summary(passes):
+    """One sentence: how many passes, on which sites, from which day to which day"""
+    sites = sorted({node["meta"].get("site", one["site"]) for one in passes for node in one["nodes"]} - {""})
+    days = sorted(one["meta"].get("date", "")[:10] for one in passes if one["meta"].get("date"))
+    checked = sum(sum(len(node["records"]) for node in one["nodes"]) + len(one.get("cross", [])) for one in passes)
+    when = days[0] if days and days[0] == days[-1] else "%s to %s" % (days[0], days[-1]) if days else "no date"
+    return "%d passes on the sites %s, %s: %d checks, all passed." % (
+        len(passes), ", ".join(site.upper() for site in sites), when, checked)
 
 
 def modes(page, pictures, frame):
@@ -222,49 +221,26 @@ def render(page, frame, out, never):
     pictures = Pictures(out, never)
     entry = page["entry"]
     image = page["template"] or page["iso"]
+    title = "%s %s" % (entry["name"], entry["version"])
+    made = "This page is made from %s%s and from its commissioning records." % (
+        entry["repo"], " at %s" % page["commit"] if page["commit"] else "")
     body = [
-        '<header><a href="../../appliances.html">Keel Linux applications</a></header><main>',
-        '<p class="kicker">%s</p><h1>%s</h1>' % (esc(entry["name"]), esc(entry["version"])),
+        pagesite.header(), '<main id="main" class="app"><div class="wrap">',
+        '<p class="crumbs"><a href="%s/appliances.html">Appliances</a> / %s</p>' % (pagesite.SITE, esc(entry["name"])),
+        '<span class="eyebrow">%s</span><h1>%s</h1>' % (esc(entry["name"]), esc(entry["version"])),
         '<p class="release">Keel release <strong>%s</strong>%s</p>' % (
             esc(page["release"]), " &#183; image <code>%s</code>" % esc(image[0]) if image else ""),
-        "<p>%s</p>" % esc(page["about"]) if page["about"] else "",
-        install(page), first_boot(page["passes"], page["manifest"]), gallery(page["passes"], pictures),
-        modes(page, pictures, frame), results(page["passes"]),
-        "</main><footer><p>Made from %s%s and its commissioning records.</p></footer>" % (
-            esc(entry["repo"]), " at %s" % esc(page["commit"]) if page["commit"] else ""),
+        '<p class="lead">%s</p>' % esc(page["about"]) if page["about"] else "",
+        pagesite.install(entry["repo"], page), first_boot(page["passes"], page["manifest"]),
+        gallery(page["passes"], pictures), modes(page, pictures, frame), results(page["passes"]),
+        "</div></main>", pagesite.footer(made),
     ]
     return ("<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            "<title>%s</title><style>%s</style></head><body>%s</body></html>\n" % (
-                esc("%s %s" % (entry["name"], entry["version"])), STYLE, "".join(body)))
-
-
-STYLE = """
-:root{--bg:#fbfbf9;--fg:#1d2327;--muted:#5b6670;--line:#d9dde1;--card:#fff;--accent:#0b5cad;--code:#f1f3f5}
-@media (prefers-color-scheme:dark){:root{--bg:#14171a;--fg:#e6e8ea;--muted:#9aa4ad;--line:#2e353b;
---card:#1b1f23;--accent:#6cb0ff;--code:#23292e}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
-font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
-header{padding:12px 16px;border-bottom:1px solid var(--line)}a{color:var(--accent)}
-main{max-width:1180px;margin:0 auto;padding:16px}
-.kicker{margin:24px 0 0;color:var(--muted);font-weight:600;letter-spacing:.02em}
-h1{font-size:clamp(2.2rem,6vw,3.6rem);line-height:1.1;margin:4px 0 8px}
-.release{color:var(--muted);margin:0 0 24px}h2{margin-top:40px;border-top:1px solid var(--line);padding-top:24px}
-code{background:var(--code);padding:1px 5px;border-radius:4px;font-size:.9em;overflow-wrap:anywhere}
-.sha code{font-size:.8em}.tag{font-size:.75em;border:1px solid var(--line);border-radius:10px;padding:0 6px;
-color:var(--muted)}
-table{border-collapse:collapse;width:100%}th,td{border:1px solid var(--line);padding:8px;vertical-align:top;
-text-align:left}thead th{background:var(--card);position:sticky;top:0}
-.guide{overflow-x:auto;margin:12px 0 24px}.guide td{background:var(--card);min-width:260px}
-.steps{list-style:none;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));
-gap:12px}.steps li{background:var(--card);border:1px solid var(--line);padding:8px}.step{float:right;
-color:var(--muted);font-weight:600}h4{margin:16px 0 4px}.screen img{width:100%;height:auto;border:1px solid var(--line);display:block}
-.screen .label{margin:0 0 6px;font-weight:600}.typed{margin:6px 0 0;color:var(--muted)}
-pre{white-space:pre-wrap;font-size:12px;line-height:1.35;max-height:320px;overflow:auto;background:var(--code);
-padding:8px;margin:6px 0 0}
-.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
-figure{margin:0;background:var(--card);border:1px solid var(--line);padding:8px}figure img{width:100%;
-height:auto;display:block}figcaption{font-weight:600;margin-top:6px}figcaption span{font-weight:400;
-color:var(--muted);font-size:.9em}
-footer{border-top:1px solid var(--line);color:var(--muted);padding:16px;text-align:center;font-size:.9em}
-"""
+            "<title>%s, Keel Linux</title><meta name=\"description\" content=\"%s\">"
+            "<meta name=\"color-scheme\" content=\"light dark\">"
+            "<link rel=\"icon\" type=\"image/svg+xml\" href=\"%s/assets/keel-mark.svg\">"
+            "<link rel=\"stylesheet\" href=\"%s/style.css\"><style>%s</style></head><body>%s</body></html>\n" % (
+                esc(title), esc("%s: how to install it, the guide of each installation mode, and its"
+                                " commissioning result." % title), pagesite.SITE, pagesite.SITE,
+                pagesite.STYLE, "".join(body)))

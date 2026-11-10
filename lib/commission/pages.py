@@ -1,7 +1,8 @@
 #!/usr/bin/python3 -I
 """Make the page of an application from its commissioning (decision 0077).
 
-usage: pages.py build APP OUT --repo DIR --mode MODE=DIR... [--invites FILE]
+usage: pages.py build APP OUT --repo DIR --images FILE
+                (--evidence DIR | --mode MODE=DIR...) [--invites FILE]
        pages.py check OUT [--invites FILE]
 
 build writes OUT/index.html and OUT/img/: the page that keellinux.org/apps/APP/
@@ -12,21 +13,32 @@ serves from the "pages" branch of the appliance repository. It reads:
                                changelog (the Keel release), README.rst (what
                                the application is) and the manifest of
                                packages/*/manifest.yaml when there is one
+    --images FILE              the published images, as sha256sum writes
+                               them: the page names the template and the ISO
+                               of the application from it (pageimages.py)
+    --evidence DIR             the commissioning of one image: DIR/SITE/PASS/
+                               for the single machines, DIR/cloud/cloud_simple
+                               and DIR/cloud/cloud_advanced for the pairs
     --mode simple=DIR          a run of single machines: DIR/SITE/PASS/ with
                                meta, record.tsv and screens.tsv (lxc-* and
                                vm-iso), as keel-commission writes them
     --mode cloud_simple=DIR    a pass of several nodes: DIR/meta and
     --mode cloud_advanced=DIR  DIR/NODE/ for each node
 
+A folder whose name has "superseded" in it is never read: it holds the
+records of an image that a newer one replaced.
+
 Every pass and every check of a node must have passed: a page never shows
-an image that did not pass. The page holds the text frames of a
+an image that did not pass. Every pass and every node of the application
+must have run the image of the list, with its sha256. The page holds the text frames of a
 container's screens, and these hold the invite of the mesh when the run did
 not mask it. So the text is masked again with the invites of --invites, one
 for each line, as mask.py does, and then every text file of OUT is checked:
 build and check stop with status 1 when a "keelN:" token, a piece of an
 invite of 12 characters or more, or a run of 12 characters or more that
 has an upper case letter, a lower case letter and a digit (a piece of a
-token or of a password) is in it. A picture cannot be masked, so a picture
+token or of a password) is in it. Each text screen is checked in full
+before the page cuts it to its last lines. A picture cannot be masked, so a picture
 of an invite or a join screen stops the build.
 """
 
@@ -42,6 +54,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import mask  # noqa: E402  (beside this file)
 import pagehtml  # noqa: E402
+import pageimages  # noqa: E402
 import yaml  # noqa: E402
 
 MODES = ("simple", "cloud_simple", "cloud_advanced")
@@ -52,6 +65,7 @@ RUN = re.compile(r"[A-Za-z0-9_-]{12,}")
 WGKEY = re.compile(r"[A-Za-z0-9+/]{43}=")
 STARS = re.compile(r"\*{4,}")
 PICTURE_NEVER = re.compile(r"invite|join")
+CLOUD = ("cloud_simple", "cloud_advanced")
 
 
 Refused = pagehtml.Refused
@@ -106,20 +120,35 @@ def passed(folder):
     return meta
 
 
-def simple_passes(run):
+def site_passes(folder, site):
+    """The passes of single machines under FOLDER, the folder of SITE"""
+    found = []
+    for name in sorted(os.listdir(folder)):
+        sub = os.path.join(folder, name)
+        if os.path.isfile(os.path.join(sub, "meta")):
+            meta = passed(sub)
+            found.append({"mode": "simple", "name": name, "site": meta.get("site", site),
+                          "folder": sub, "meta": meta, "nodes": [machine(sub, name)]})
+    return found
+
+
+def simple_passes(run, skip=()):
     """The passes of single machines under RUN/SITE/PASS, in order"""
     found = []
     for site in sorted(os.listdir(run)):
-        for name in sorted(os.listdir(os.path.join(run, site)) if os.path.isdir(os.path.join(run, site)) else []):
-            folder = os.path.join(run, site, name)
-            if os.path.isfile(os.path.join(folder, "meta")):
-                meta = passed(folder)
-                one = machine(folder, name)
-                found.append({"mode": "simple", "name": name, "site": meta.get("site", site),
-                              "meta": meta, "nodes": [one]})
+        folder = os.path.join(run, site)
+        if site not in skip and os.path.isdir(folder):
+            found.extend(site_passes(unused(folder), site))
     if not found:
         raise Refused("%s: no pass of a single machine (SITE/PASS/meta)" % run)
     return found
+
+
+def unused(folder):
+    """FOLDER, refused when it holds the records of a superseded image"""
+    if "superseded" in os.path.basename(os.path.normpath(folder)):
+        raise Refused("%s: a superseded folder is never used" % folder)
+    return folder
 
 
 def cloud_pass(mode, folder):
@@ -135,26 +164,8 @@ def cloud_pass(mode, folder):
     if not nodes:
         raise Refused("%s: a pass of %s with no node" % (folder, mode))
     nodes.sort(key=lambda node: int(node["meta"].get("vmid", 0) or 0))
-    return {"mode": mode, "name": mode, "site": meta.get("site", ""), "meta": meta, "nodes": nodes,
-            "cross": checks(folder)}
-
-
-def image(passes, kind):
-    """(file name, sha256) of the image that every pass of KIND ran, None
-    when no pass is of that kind; refused when two passes ran different ones"""
-    seen = set()
-    for one in passes:
-        if one["mode"] == "simple" and (one["name"] == "vm-iso") == (kind == "iso"):
-            value = one["meta"].get(kind, "")
-            seen.add((os.path.basename(value.partition(":")[2] or value), one["meta"].get("sha256", "")))
-    if len(seen) > 1:
-        raise Refused("the passes ran %d different %s images: %s" % (len(seen), kind, sorted(seen)))
-    if not seen:
-        return None
-    name, sha256 = seen.pop()
-    if not name or not re.fullmatch(r"[0-9a-f]{64}", sha256):
-        raise Refused("a pass of the %s names no image or no sha256" % kind)
-    return name, sha256
+    return {"mode": mode, "name": mode, "site": meta.get("site", ""), "folder": folder, "meta": meta,
+            "nodes": nodes, "cross": checks(folder)}
 
 
 def release(repo):
@@ -274,21 +285,44 @@ def check(out, invites=()):
 
 
 def frame(path, invites):
-    """The text of a container's screen, masked and cut into lines"""
+    """The text of a container's screen, masked and cut into lines; refused
+    when the whole masked text holds what leaks() finds"""
     with open(path, encoding="utf-8", errors="replace") as handle:
-        return pagehtml.frame_lines(masked(handle.read(), invites))
+        text = masked(handle.read(), invites)
+    found = leaks(text, invites)
+    if found:
+        raise Refused("%s: %s" % (pageimages.where(path, 3), "; ".join(sorted(set(found)))))
+    return pagehtml.frame_lines(text)
 
 
 def collect(args):
-    """The passes of the modes given on the command line"""
+    """The passes of the folders given on the command line"""
+    if not args.evidence and not args.mode:
+        raise Refused("give --evidence or --mode: no commissioning to read")
     passes = []
+    for folder in args.evidence:
+        passes.extend(evidence(folder))
     for given in args.mode:
         mode, _, folder = given.partition("=")
         if mode not in MODES or not folder:
             raise Refused("--mode %r: MODE=DIR, MODE one of %s" % (given, ", ".join(MODES)))
         if not os.path.isdir(folder):
             raise Refused("--mode %s: %s is not a folder" % (mode, folder))
+        unused(folder)
         passes.extend(simple_passes(folder) if mode == "simple" else [cloud_pass(mode, folder)])
+    return passes
+
+
+def evidence(folder):
+    """The passes of one commissioning folder: FOLDER/SITE/PASS for the
+    single machines, FOLDER/cloud/MODE for the passes of several nodes"""
+    if not os.path.isdir(folder):
+        raise Refused("--evidence %s is not a folder" % folder)
+    passes = simple_passes(unused(folder), skip=("cloud",))
+    cloud = os.path.join(folder, "cloud")
+    for mode in CLOUD:
+        if os.path.isdir(os.path.join(cloud, mode)):
+            passes.append(cloud_pass(mode, unused(os.path.join(cloud, mode))))
     return passes
 
 
@@ -312,11 +346,15 @@ def build(args):
     in a folder of its own first, so a refused page changes nothing in OUT."""
     invites = read_invites(args.invites)
     entry = app_entry(args.apps, args.app, args.repo)
+    images = pageimages.read(args.images)
+    version = release(args.repo)
+    published = pageimages.own(images, entry["repo"], version)
     passes = collect(args)
+    pageimages.check(passes, images, published)
     found = manifest(args.repo)
-    page = {"app": args.app, "entry": entry, "release": release(args.repo), "about": about(args.repo),
+    page = {"app": args.app, "entry": entry, "release": version, "about": about(args.repo),
             "manifest": found, "commit": commit(args.repo), "passes": passes,
-            "template": image(passes, "template"), "iso": image(passes, "iso")}
+            "template": published["template"], "iso": published["iso"]}
     parent = os.path.dirname(os.path.abspath(args.out))
     os.makedirs(parent, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".pages-", dir=parent) as made:
@@ -343,7 +381,9 @@ def main(argv):
     one.add_argument("app")
     one.add_argument("out")
     one.add_argument("--repo", required=True)
-    one.add_argument("--mode", action="append", required=True)
+    one.add_argument("--images", required=True)
+    one.add_argument("--evidence", action="append", default=[])
+    one.add_argument("--mode", action="append", default=[])
     one.add_argument("--apps", default=os.path.join(here, "apps.yaml"))
     one.add_argument("--invites")
     two = sub.add_parser("check")

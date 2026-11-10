@@ -1,0 +1,18 @@
+#!/bin/bash
+# keel-app-page: the page of an application at keellinux.org/apps/NAME/
+# (handbook decision 0077), from a checkout of its repository, the list of
+# the published images and its commissioning records.
+#
+#   keel-app-page APP OUT --repo DIR --images FILE --evidence DIR [--invites FILE]
+#   keel-app-page check OUT [--invites FILE]
+#
+# The work is in lib/commission/pages.py; its docstring says what the page
+# holds and what stops it. Exit 0: the page is written (or checked) and
+# holds no secret. Exit 1: refused, and nothing in OUT changed.
+set -euo pipefail
+
+PAGES="$(cd "$(dirname "$(readlink -f "$0")")/../lib/commission" && pwd)/pages.py"
+if [ "${1:-}" = check ]; then
+    exec python3 -I "$PAGES" "$@"
+fi
+exec python3 -I "$PAGES" build "$@"
