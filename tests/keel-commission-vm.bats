@@ -649,6 +649,59 @@ PY
     [[ "$output" == *"challenged page: / has a stylesheet that did not load: https://10.0.0.1/wp-admin/load-styles.php (status 200, text/html, starts <!doctype html>) (1 shot)"* ]]
 }
 
+@test "webshot.py: a login whose field does not show fails, after its shot is written" {
+    # The login page of Odoo 18 has its form in the page but hidden, and
+    # blocks the click of its button, until a script that loads later shows
+    # it. On a first view that script came late (its commit waited for the
+    # standby): webshot found the field in the page, filled and clicked a
+    # form that the page did not show, no login was made, and the run said
+    # "the password field #password is still on the page" (odoo
+    # cloud_simple, BR1 and BR2, release A3, 2026-11-10). A login is tried
+    # only when the page shows the field; the picture of the page without it
+    # stays as the evidence.
+    run python3 -I - "${CONTRACT_PY%/*}/webshot.py" "$TMP" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("webshot", sys.argv[1])
+webshot = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(webshot)
+webshot.time.sleep = lambda s: None
+os.environ["KC_SECRET_app"] = "s3cret"
+class Fake:
+    wait = 30
+    def __init__(self, comes):
+        self.comes, self.shots, self.logins = comes, [], 0
+    def open(self, url):
+        pass
+    def wait_for(self, selector):
+        return self.comes
+    def evaluate(self, expression):
+        return [] if "stylesheet" in expression else False
+    def not_css(self):
+        return []
+    def shot(self, path):
+        self.shots.append(os.path.basename(path))
+    def login(self, *args):
+        self.logins += 1
+    def status(self):
+        return 200
+fields = ("odoo", "https", "443", "/web/login", "/odoo", "#login", "admin", "#password",
+          "app", "button[type=submit]", "0", "")
+shown = Fake(True)
+webshot.take(shown, "fd00::1", sys.argv[2], 1, fields)
+print("shown: %d login, %s" % (shown.logins, " ".join(shown.shots)))
+hidden = Fake(False)
+try:
+    webshot.take(hidden, "fd00::1", sys.argv[2], 2, fields)
+    print("hidden passed")
+except OSError as e:
+    print("hidden: %s (%d login, %s)" % (e, hidden.logins, " ".join(hidden.shots)))
+PY
+    echo "$output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"shown: 1 login, web-01-odoo.png web-01-odoo-after.png"* ]]
+    [[ "$output" == *"hidden: the field #login did not show in 30 s, so the login was not tried (0 login, web-02-odoo.png)"* ]]
+}
+
 @test "webshot.py: the shot of a page with a text waits until the page shows it" {
     # Webmin's dashboard on a VM of BR2 came later than the page stayed
     # still: the after-login shot showed the menu only (2026-11-06). A shot
@@ -1111,12 +1164,12 @@ EOF
     # app: the login form comes after a challenge page, as behind Anubis
     printf 'shot\tapp\thttp\t%s\t/challenge\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\nshot\tfront\thttp\t%s\t/x\t\t\t\t\t\t\t0\nshot\tbad\thttp\t%s\t/\t\t#nofield\tadmin\t#p\tapp\t#go\t0\n' \
         "$port" "$port" "$port" > "$TMP/shots"
-    KC_SECRET_app=s3cret run python3 -I "$LIB/webshot.py" 127.0.0.1 "$TMP/w" 1 < "$TMP/shots"
+    KC_WEB_WAIT=8 KC_SECRET_app=s3cret run python3 -I "$LIB/webshot.py" 127.0.0.1 "$TMP/w" 1 < "$TMP/shots"
     kill "$server"
     [ "$status" -eq 1 ]
     [[ "$output" == *$'01\tweb-app-after\tweb-01-app-after.png\tafter the login: /admin'* ]]
     [[ "$output" == *$'02\tweb-front\tweb-02-front.png\topen /x'* ]]
-    [[ "$output" == *"webshot: bad: no field #nofield on the page"* ]]
+    [[ "$output" == *"webshot: bad: the field #nofield did not show in 8 s, so the login was not tried"* ]]
     [[ "$output" != *s3cret* ]]
     [ "$(head -c 8 "$TMP/w/web-01-app-after.png" | od -An -tx1 | tr -d ' \n')" = 89504e470d0a1a0a ]
 }
@@ -1137,6 +1190,29 @@ EOF
     [[ "$output" == *$'03\tweb-after-after\tweb-03-after-after.png\tafter the login: /admin'* ]]
     [[ "$output" != *"webshot: after"* ]]
     [[ "$output" != *"webshot: yes"* ]]
+}
+
+@test "webshot: a login form that shows late is waited for, and one that never shows fails" {
+    command -v chromium >/dev/null || skip "no chromium on this host"
+    port=$((20000 + RANDOM % 20000))
+    python3 -I "$BATS_TEST_DIRNAME/fixtures/commission/loginsrv.py" "$port" &
+    server=$!
+    sleep 1
+    # never: the form is in the page, hidden, and never shows
+    # late: the page shows it after five seconds, and its submit does
+    # nothing before, as the login page of Odoo 18
+    printf 'shot\tnever\thttp\t%s\t/never\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\nshot\tlate\thttp\t%s\t/late\t/admin\t#u\tadmin\t#p\tapp\t#go\t0\tDashboard\n' \
+        "$port" "$port" > "$TMP/shots"
+    KC_WEB_WAIT=8 KC_SECRET_app=s3cret run python3 -I "$LIB/webshot.py" 127.0.0.1 "$TMP/w" 1 < "$TMP/shots"
+    kill "$server"
+    echo "$output"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"webshot: never: the field #u did not show in 8 s, so the login was not tried"* ]]
+    # the page without its form is still written, as evidence, and no login is tried
+    [ -s "$TMP/w/web-01-never.png" ]
+    [ ! -e "$TMP/w/web-01-never-after.png" ]
+    [[ "$output" == *$'02\tweb-late-after\tweb-02-late-after.png\tafter the login: /admin'* ]]
+    [[ "$output" != *"webshot: late"* ]]
 }
 
 @test "webshot: a login that ends on an error page, or on its form again, fails" {
