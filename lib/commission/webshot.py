@@ -11,7 +11,10 @@ SHOTS has one line per screenshot, the `shot` lines of contract.py tsv:
 HOST is the address of the machine (an IPv6 address without brackets is
 put in brackets). Each page is opened at SCHEME://HOST:PORT/PATH in a
 window of 1280x800 and written to OUTDIR/web-NN-NAME.png, NN counted from
-FIRST, WAIT seconds after it has loaded. A shot with a login fills USER_FIELD and PASS_FIELD (CSS selectors),
+FIRST, WAIT seconds after it has loaded. A shot with a login waits until
+the page shows USER_FIELD (at most KC_WEB_WAIT seconds; a field that is in
+the page but hidden does not count, and the login is then not tried), fills
+USER_FIELD and PASS_FIELD (CSS selectors),
 clicks SUBMIT, and writes a second screenshot, web-NN-NAME-after.png, of
 AFTER (or of the page the login went to). That page must answer with an
 HTTP status below 400 and must not show PASS_FIELD again. When TEXT is
@@ -265,12 +268,20 @@ class Browser:
         self.settle()
 
     def wait_for(self, selector):
-        """Wait up to the browser's wait for SELECTOR on the page. A cloud
-        node puts Anubis in front: its challenge page comes first, and the
-        login form only once the browser has solved it (BR1 and BR2,
-        2026-11-06). True when it came."""
+        """Wait up to the browser's wait until the page shows SELECTOR. A
+        cloud node puts Anubis in front: its challenge page comes first, and
+        the login form only once the browser has solved it (BR1 and BR2,
+        2026-11-06). The login page of Odoo 18 has its form in the page but
+        hidden, and blocks the click of its button, until its lazy script
+        has loaded: on a first view with a slow standby the form was filled
+        and clicked before the page showed it, and no login was made (odoo
+        cloud_simple, release A3, 2026-11-10). An element that has no box
+        on the page (display: none, on it or around it) does not count.
+        True when it came."""
         deadline = time.time() + self.wait
-        probe = "document.querySelector(%s) !== null" % json.dumps(selector)
+        probe = ("(function(s){var e=document.querySelector(s);"
+                 " return !!(e && e.getClientRects().length);})(%s)"
+                 % json.dumps(selector))
         while time.time() < deadline:
             if self.evaluate(probe):
                 return True
@@ -335,12 +346,18 @@ def take(browser, host, outdir, number, fields):
     lines = []
     first = "web-%02d-%s.png" % (number, name)
     browser.open(url_of(host, scheme, port, path))
+    shown = True
     if user_field:
-        browser.wait_for(user_field)
+        shown = browser.wait_for(user_field)
     elif text:
         browser.wait_text(text)
     time.sleep(wait)
     browser.shot(os.path.join(outdir, first))
+    if not shown:
+        # the shot is the evidence: a login on a form that the page does not
+        # show does nothing, and the failure would name the page after it
+        raise OSError("the field %s did not show in %d s, so the login was not tried"
+                      % (user_field, browser.wait))
     styled(browser, path)
     if not user_field:
         lines.append("%02d\tweb-%s\t%s\topen %s" % (number, name, first, path))

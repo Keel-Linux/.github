@@ -5,7 +5,10 @@ usage: python3 loginsrv.py PORT
 / is the login form (fields #u and #p, button #go); a POST of admin and
 s3cret sets a cookie and goes to /admin, which says Dashboard with the
 cookie and denied, with 403, without it. /challenge is a page that goes to / after
-two seconds, as the challenge of Anubis does once it is solved.
+two seconds, as the challenge of Anubis does once it is solved. /late has
+the form in the page but hidden, and blocks its submit, until a script shows
+it after five seconds, as the login page of Odoo 18 does until its lazy
+script has loaded; /never is the same page, and its form never shows.
 """
 
 import http.server
@@ -14,6 +17,15 @@ import urllib.parse
 
 FORM = ('<h1>Login</h1><form method=post><input id=u name=u>'
         '<input id=p name=p type=password><button id=go>Go</button></form>')
+
+HIDDEN = ('<h1>Login</h1><form id=f method=post action=/ style="display:none">'
+          '<input id=u name=u><input id=p name=p type=password>'
+          '<button id=go>Go</button></form>'
+          '<script>var f = document.getElementById("f");'
+          'function block(e) { e.preventDefault(); e.stopImmediatePropagation(); }'
+          'f.addEventListener("submit", block, true);%s</script>')
+SHOW = ('setTimeout(function() { f.removeEventListener("submit", block, true);'
+        ' f.style.display = ""; }, 5000);')
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -35,6 +47,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/challenge"):
             self.page("<p>Making sure you are not a bot</p>"
                       "<script>setTimeout(function(){location='/'}, 2000)</script>")
+        elif self.path.startswith("/late"):
+            self.page(HIDDEN % SHOW)
+        elif self.path.startswith("/never"):
+            self.page(HIDDEN % "")
         elif self.path.startswith("/admin"):
             good = "kc=ok" in (self.headers.get("Cookie") or "")
             self.page("<h1>%s</h1>" % ("Dashboard" if good else "denied"), 200 if good else 403)
