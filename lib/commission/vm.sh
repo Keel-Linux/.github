@@ -25,6 +25,21 @@ vm_value() {
     grep $'^vm\t'"$1"$'\t' <<< "$KC_TSV" | cut -f3
 }
 
+# vm_cpu: the CPU type of the contract's vm.cpu, empty when it names none.
+# contract.py accepts only these names; the value goes into the qm create
+# command line on the PVE host, so it is checked here again.
+vm_cpu() {
+    local cpu
+    cpu=$(vm_value cpu)
+    case "$cpu" in
+        ""|kvm64|x86-64-v2|x86-64-v2-AES|x86-64-v3|host) printf '%s' "$cpu" ;;
+        *)
+            echo "keel-commission: vm.cpu '$cpu' is not kvm64, x86-64-v2, x86-64-v2-AES, x86-64-v3 or host" >&2
+            return 1
+            ;;
+    esac
+}
+
 # vm_firmware VOLID: ovmf when the ISO boots by UEFI (it has /EFI), else
 # seabios. A host without isoinfo gets seabios; KC_VM_FIRMWARE overrides.
 vm_firmware() {
@@ -41,14 +56,17 @@ vm_firmware() {
 # the ISO on a CD-ROM, a virtio disk on KC_VM_STORAGE, the guest agent on,
 # the disk first in the boot order (an empty disk falls through to the
 # CD-ROM). KC_VM_OPTS adds the site's network and other options. The
-# helpers the driver runs on the host go to /tmp/kcVMID.
+# contract's vm.cpu gives --cpu; with no vm.cpu the line has no --cpu, and
+# the VM has kvm64. The helpers the driver runs on the host go to
+# /tmp/kcVMID.
 vm_create() {
-    local bios="" firmware
+    local bios="" firmware cpu
+    cpu=$(vm_cpu) || return 1
     firmware=$(vm_firmware "$1")
     if [ "$firmware" = ovmf ]; then
         bios="--bios ovmf --machine q35 --efidisk0 $KC_VM_STORAGE:1,efitype=4m,pre-enrolled-keys=0"
     fi
-    pve_retry "qm create $KC_VMID --name kc$KC_VMID --memory $(vm_value memory) --cores $(vm_value cores) --ostype l26 --scsihw virtio-scsi-single --virtio0 $KC_VM_STORAGE:$(vm_value disk) --ide2 '$1',media=cdrom --boot 'order=virtio0;ide2' --agent enabled=1 --vga std $bios $KC_VM_OPTS" || return 1
+    pve_retry "qm create $KC_VMID --name kc$KC_VMID --memory $(vm_value memory) --cores $(vm_value cores)${cpu:+ --cpu $cpu} --ostype l26 --scsihw virtio-scsi-single --virtio0 $KC_VM_STORAGE:$(vm_value disk) --ide2 '$1',media=cdrom --boot 'order=virtio0;ide2' --agent enabled=1 --vga std $bios $KC_VM_OPTS" || return 1
     pve "mkdir -p $KC_HOST_TMP/kc$KC_VMID && cat > $KC_HOST_TMP/kc$KC_VMID/ppm2png.py" < "$KC_LIB/ppm2png.py"
     pve "cat > $KC_HOST_TMP/kc$KC_VMID/qga.py" < "$KC_LIB/qga.py"
 }
@@ -294,9 +312,23 @@ vm_parse() {
     fi
 }
 
+# vm_record_cpu: the CPU type of the VM, as the field cpu at the end of
+# KC_DIR/meta and as a note of the record. The fields of meta before it
+# keep their names and their order: the release gate reads them.
+vm_record_cpu() {
+    local cpu how="from vm.cpu of the contract"
+    cpu=$(vm_cpu)
+    if [ -z "$cpu" ]; then
+        cpu=kvm64 how="the default of qm create"
+    fi
+    printf 'cpu\t%s\n' "$cpu" >> "$KC_DIR/meta"
+    record note vm.cpu "the VM has the CPU type $cpu, $how"
+}
+
 # pass_vm: install the ISO and answer the first boot of the disk.
 pass_vm() {
     vm_create "$KC_IMAGE" >/dev/null || die 3 "qm create failed"
+    vm_record_cpu
     vm_start || die 3 "qm start failed"
     vm_tables
     vm_drive installer "$KC_WORK/installer"

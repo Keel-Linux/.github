@@ -4,7 +4,8 @@ cloud modes. contract.py reads them with the rest of the contract.
 
 The lines they add to `contract.py tsv`, fields separated by a tab:
 
-    vm         KEY  VALUE                 memory (MiB), cores, disk (GiB)
+    vm         KEY  VALUE                 memory (MiB), cores, disk (GiB),
+                                          and cpu when the contract names it
     installer  ID  PROMPT  KEYS  FLAGS    a screen of the ISO installer
     shot       NAME  SCHEME  PORT  PATH  AFTER  USER_FIELD  USER  PASS_FIELD
                SECRET  SUBMIT  WAIT  TEXT a web screenshot; TEXT, when not
@@ -78,6 +79,12 @@ INSTALLER = [
      "keys": "{ret}{ret}", "eject": True, "last": True},
 ]
 VM = {"memory": 2048, "cores": 2, "disk": 16}
+# the CPU types a contract may give its VM (vm.cpu), for qm create --cpu.
+# A contract with no vm.cpu gets no --cpu, so the VM has kvm64, the default
+# of qm create and the strictest test. An application that needs more (the
+# sharp module of NodeBB needs x86-64-v2) names its type. The value goes
+# into a command line on the PVE host: only these exact names are accepted.
+CPUS = frozenset({"kvm64", "x86-64-v2", "x86-64-v2-AES", "x86-64-v3", "host"})
 MODES = {"simple", "cloud_simple", "cloud_advanced"}
 ROLES = {"primary", "replica", "witness"}
 KINDS = {"lxc", "vm"}
@@ -227,6 +234,12 @@ def check_vm(doc, secrets, errors):
         if not isinstance(value, int) or value < 1:
             errors.append("vm.%s %r is not a positive number" % (key, value))
         rows.append(["vm", key, str(value)])
+    if "cpu" in vm:
+        cpu = vm["cpu"]
+        if not isinstance(cpu, str) or cpu not in CPUS:
+            errors.append("vm.cpu %r is not one of %s" % (cpu, ", ".join(sorted(CPUS))))
+        else:
+            rows.append(["vm", "cpu", cpu])
     screens = vm.get("installer", INSTALLER)
     if not isinstance(screens, list) or not screens:
         errors.append("vm.installer is not a list of screens")

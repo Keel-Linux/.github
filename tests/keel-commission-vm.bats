@@ -116,6 +116,7 @@ proofs:
   - {secret: root, kind: shadow, user: root}
 vm:
   memory: 0
+  cpu: qemu64
   installer:
     - not a mapping
     - {id: Bad, prompt: 'a{b}', keys: 'a[b'}
@@ -141,6 +142,7 @@ EOF
     [ "$status" -eq 2 ]
     for want in "{nope} is not a key name" "type 'radio' is not input or choice" \
         "vm.memory 0 is not a positive number" "an installer screen is not a mapping" \
+        "vm.cpu 'qemu64' is not one of host, kvm64, x86-64-v2, x86-64-v2-AES, x86-64-v3" \
         "installer screen id 'Bad'" "prompt 'a{b}' is not usable" "has characters no key types" \
         "{secret:nope} is not a declared secret" "vm.installer has no screen with last: true" \
         "a screenshot is not a mapping" "screenshot name 'Bad'" "scheme 'ftp'" "port 0 is not a port" \
@@ -165,11 +167,12 @@ EOF
     for want in "vm is not a mapping" "screenshots is not a list" "cloud is not a mapping" "nodes is not a list"; do
         [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
     done
-    printf 'contract: 1\nappliance: x\nsecrets: [root]\nquestions: [{id: r, hook: 30rootpass, prompt: R, answer: "secret:root"}]\nproofs: [{secret: root, kind: shadow, user: root}]\nvm: {installer: []}\ncloud: {capture: [1], checks: {}, waits: x}\n' > "$TMP/c.yaml"
+    printf 'contract: 1\nappliance: x\nsecrets: [root]\nquestions: [{id: r, hook: 30rootpass, prompt: R, answer: "secret:root"}]\nproofs: [{secret: root, kind: shadow, user: root}]\nvm: {installer: [], cpu: [host]}\ncloud: {capture: [1], checks: {}, waits: x}\n' > "$TMP/c.yaml"
     run "$KC" --check "$TMP/c.yaml"
     [ "$status" -eq 2 ]
     [[ "$output" == *"cloud.waits is not a list"* ]]
     [[ "$output" == *"vm.installer is not a list of screens"* ]]
+    [[ "$output" == *"vm.cpu ['host'] is not one of"* ]]
     [[ "$output" == *"cloud.capture is not a mapping"* ]]
     [[ "$output" == *"cloud.checks is not a list"* ]]
 }
@@ -373,6 +376,56 @@ EOF
     run_vm
     [ "$status" -eq 3 ]
     [[ "$output" == *"qm start failed"* ]]
+}
+
+@test "vm-iso: with no vm.cpu, qm create is the line of before and the record names kvm64" {
+    vm_setup
+    touch "$STATE/start-fails"
+    run_vm
+    [ "$status" -eq 3 ]
+    grep -qxF "pve qm create 9001 --name kc9001 --memory 1024 --cores 2 --ostype l26 --scsihw virtio-scsi-single --virtio0 local-lvm:16 --ide2 'local:iso/demo.iso',media=cdrom --boot 'order=virtio0;ide2' --agent enabled=1 --vga std  " "$LOG"
+    run grep -c -- '--cpu' "$LOG"
+    [ "$output" = 0 ]
+    grep -qx $'cpu\tkvm64' "$OUT/vm-iso/meta"
+    grep -qx $'note\tvm.cpu\tthe VM has the CPU type kvm64, the default of qm create' "$OUT/vm-iso/record.tsv"
+    # the fields of before keep their order, the new one comes after them
+    [ "$(cut -f1 "$OUT/vm-iso/meta" | tr '\n' ' ')" = "pass site iso sha256 contract date cpu " ]
+}
+
+@test "vm-iso: the CPU type of vm.cpu goes to qm create and to the record" {
+    vm_setup
+    sed -i 's/^  memory: 1024$/  memory: 1024\n  cpu: x86-64-v2-AES/' "$TMP/c.yaml"
+    run "$KC" --check "$TMP/c.yaml"
+    [ "$status" -eq 0 ]
+    touch "$STATE/start-fails"
+    run_vm
+    [ "$status" -eq 3 ]
+    grep -qxF "pve qm create 9001 --name kc9001 --memory 1024 --cores 2 --cpu x86-64-v2-AES --ostype l26 --scsihw virtio-scsi-single --virtio0 local-lvm:16 --ide2 'local:iso/demo.iso',media=cdrom --boot 'order=virtio0;ide2' --agent enabled=1 --vga std  " "$LOG"
+    grep -qx $'cpu\tx86-64-v2-AES' "$OUT/vm-iso/meta"
+    grep -qx $'note\tvm.cpu\tthe VM has the CPU type x86-64-v2-AES, from vm.cpu of the contract' "$OUT/vm-iso/record.tsv"
+}
+
+@test "vm_create: a CPU type off the list never reaches qm create" {
+    # contract.py refuses it first; vm.sh checks the value again, as it
+    # goes into a command line on the PVE host
+    # shellcheck source=../lib/commission/vm.sh
+    source "$LIB/vm.sh"
+    pve_retry() { echo "pve_retry $*" >> "$TMP/calls"; }
+    pve() { echo "pve $*" >> "$TMP/calls"; }
+    KC_VM_FIRMWARE=seabios KC_VMID=9001
+    for bad in 'qemu64' 'host; reboot' 'x86-64-v2-aes' 'host --args x'; do
+        KC_TSV=$(printf 'vm\tmemory\t1024\nvm\tcores\t2\nvm\tdisk\t16\nvm\tcpu\t%s\n' "$bad")
+        run vm_create local:iso/x.iso
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"vm.cpu '$bad' is not kvm64, x86-64-v2, x86-64-v2-AES, x86-64-v3 or host"* ]]
+    done
+    [ ! -e "$TMP/calls" ]
+    for good in kvm64 x86-64-v2 x86-64-v2-AES x86-64-v3 host; do
+        KC_TSV=$(printf 'vm\tcpu\t%s\n' "$good")
+        run vm_cpu
+        [ "$status" -eq 0 ]
+        [ "$output" = "$good" ]
+    done
 }
 
 @test "vm-iso: UEFI when the ISO has /EFI, or when the site says so" {
@@ -1141,6 +1194,8 @@ EOF
     run_cloud
     [ "$status" -eq 1 ]
     grep -q "qm create 9002 .*--ide2 'local:iso/n.iso'" "$LOG"
+    # a VM node names its CPU type in its own meta
+    grep -qx $'cpu\tkvm64' "$OUT/cloud_simple/two/meta"
     grep -q 'qm destroy 9002' "$LOG"
 }
 
