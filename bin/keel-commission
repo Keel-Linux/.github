@@ -22,7 +22,11 @@
 #                the machine before its first boot, and no question may be
 #                left for keel-init (--template);
 #                vm-iso: a VM boots the ISO, the installer and the first
-#                boot of the disk are answered on its screen (--iso);
+#                boot of the disk are answered on its screen (--iso). The
+#                VM has the CPU type of the contract's vm.cpu (kvm64,
+#                x86-64-v2, x86-64-v2-AES, x86-64-v3 or host), and kvm64
+#                when the contract names none; the meta of the pass names
+#                it in the field cpu;
 #                cloud_simple, cloud_advanced: every node of that mode in
 #                the contract's nodes, then the checks across them (a node
 #                without an image of its own takes --template or --iso).
