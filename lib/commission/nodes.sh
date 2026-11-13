@@ -41,6 +41,21 @@ node_tsv() {
     grep -E $'^(capture|wait)\t' <<< "$KC_TSV"
 }
 
+# node_checks: a node with urls or proofs of its own (nurl, nproof lines
+# of KC_NODE) takes them in place of the contract's url or proof lines.
+# The replica of a Nextcloud pair is closed by design: its site answers
+# 503 and no login over HTTP works there (keel-nextcloud, 2026-11-12).
+node_checks() {
+    local kind own lead
+    for kind in url proof; do
+        lead="n$kind"$'\t'"$KC_NODE"$'\t'
+        own=$(grep -F "$lead" <<< "$KC_TSV" | grep $'^n'"$kind"$'\t')
+        [ -n "$own" ] || continue
+        own="${own//$lead/$kind$'\t'}"
+        KC_TSV=$(grep -v $'^'"$kind"$'\t' <<< "$KC_TSV"; printf '%s\n' "$own")
+    done
+}
+
 # node_use INDEX: the globals of the node KC_NODES[INDEX]. The loops over
 # the nodes call it in a subshell, so each node keeps its own.
 node_use() {
@@ -50,6 +65,7 @@ node_use() {
     if [ -n "$contract" ] && [ "$contract" != - ]; then
         KC_TSV=$(node_tsv "$contract")
     fi
+    node_checks
     node_image "$name"
     if [ "$KC_IMAGE" = - ]; then
         if [ "$kind" = vm ]; then KC_IMAGE="$KC_ISO"; else KC_IMAGE="$KC_TEMPLATE"; fi

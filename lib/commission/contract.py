@@ -30,6 +30,11 @@ The lines of `tsv`, one record per line, fields separated by a tab:
     service    NAME
     url        URL  STATUS
     forbid     KIND  NAME
+    nurl       NODE  URL  STATUS
+    nproof     NODE  SECRET  KIND  ARG1  ARG2  ARG3
+
+A node of a cloud mode with nurl lines takes them in place of the url
+lines, and one with nproof lines in place of the proof lines (nodes.sh).
 
 and the lines of screens.py: vm, installer, shot, node, answer, capture and
 cross. bin/keel-commission reads them; it never parses YAML itself.
@@ -218,6 +223,32 @@ def check_checks(doc, errors):
     return rows
 
 
+def node_checks(doc, secrets, errors):
+    """The nurl and nproof rows: the urls and the proofs a node of this
+    appliance has in place of the contract's, checked as those are. The
+    replica of a Nextcloud pair is closed by design (503, no login over
+    HTTP), so the urls and the proofs of the open node fail there. A node
+    with proofs of its own proves every secret too."""
+    rows = []
+    items = doc.get("nodes")
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or not ("urls" in item or "proofs" in item):
+            continue
+        name = str(item.get("name", ""))
+        more = []
+        if item.get("contract"):
+            more.append("urls and proofs are for a node of this appliance: %s has its own"
+                        % item["contract"])
+        if "urls" in item:
+            rows += [["nurl", name] + row[1:] for row in
+                     check_checks({"urls": item["urls"]}, more) if row[0] == "url"]
+        if "proofs" in item:
+            rows += [["nproof", name] + row[1:] for row in
+                     check_proofs({"proofs": item["proofs"]}, secrets, more)]
+        errors += ["node %s: %s" % (name, e) for e in more]
+    return rows
+
+
 def tsv(path):
     rows, errors = contract_rows(path, nested=False)
     if errors:
@@ -245,6 +276,7 @@ def contract_rows(path, nested):
     rows += check_proofs(doc, secrets, errors)
     rows += check_checks(doc, errors)
     rows += screens.rows(doc, secrets, errors)
+    rows += node_checks(doc, secrets, errors)
     if "instance" in doc and not isinstance(doc["instance"], dict):
         errors.append("instance is not a mapping")
     for row in rows:

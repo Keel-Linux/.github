@@ -831,6 +831,75 @@ PY
     [ ! -e "$OUT/cloud_simple/two/screens/web-01-site.png" ]
 }
 
+@test "cloud: a node with urls and proofs of its own takes them in place of the contract's" {
+    # the replica of a Nextcloud pair is closed by design: its site answers
+    # 503 and no login over HTTP works there (keel-nextcloud, 2026-11-12)
+    cloud_contract
+    sed -i "/keys: '{vip}{ret}'/a\\    urls: [{url: 'https://127.0.0.1/', status: 503}]\\n    proofs: [{secret: root, kind: shadow, user: root}, {secret: db, kind: command, run: 'test -n \"\$SECRET\"'}]" "$TMP/c.yaml"
+    run python3 -I "$CONTRACT_PY" tsv "$TMP/c.yaml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'\nurl\thttps://127.0.0.1/\t200\n'* ]]
+    [[ "$output" == *$'\nnurl\ttwo\thttps://127.0.0.1/\t503\n'* ]]
+    [[ "$output" == *$'\nnproof\ttwo\tdb\tcommand\ttest -n "$SECRET"\t\t'* ]]
+    good_machine
+    answering_expect
+    printf 'https://127.0.0.1/ 503\n' > "$STATE/urls.9002"
+    printf '#!/bin/bash\nexec bash -c "$*"\n' > "$FAKES/pve2"
+    chmod +x "$FAKES/pve2"
+    export KC_PVE_BR2="$FAKES/pve2" KC_BOOT_TIMEOUT=30
+    printf 'KC_HINT\nKC_SEEN mode\nKC_INVITE keel1:SECRETTOKEN\nKC_VIP fd00::ffff:1\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9001"
+    printf 'KC_HINT\nKC_SEEN join\nKC_SEEN vip\nKC_SEEN root_password\nKC_SEEN db_password\nKC_SEEN email\nKC_DONE\n' > "$STATE/screen.9002"
+    printf 'vip fd00::ffff:1: holder\n3 voter(s)\n' > "$STATE/keel.9001"
+    printf 'vip fd00::ffff:1: follower\n' > "$STATE/keel.9002"
+    run_cloud
+    echo "$output"
+    for want in "pass  one:url.https://127.0.0.1/" "pass  two:url.https://127.0.0.1/" \
+        "pass  one:proof.db.mysql" "pass  two:proof.db.command" \
+        "pass  one:proof.root.shadow" "pass  two:proof.root.shadow"; do
+        [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
+    done
+    grep -qx $'pass\turl.https://127.0.0.1/\t503' "$OUT/cloud_simple/two/record.tsv"
+    grep -qx $'pass\turl.https://127.0.0.1/\t200' "$OUT/cloud_simple/one/record.tsv"
+    # the node's own lines replace the contract's, they do not add to them
+    [ "$(grep -c 'proof.db.mysql' "$OUT/cloud_simple/two/record.tsv")" -eq 0 ]
+    [ "$(grep -c 'proof.db.command' "$OUT/cloud_simple/one/record.tsv")" -eq 0 ]
+    [ "$(grep -c $'\turl\\.' "$OUT/cloud_simple/two/record.tsv")" -eq 1 ]
+}
+
+@test "the urls and proofs of a node are checked as the contract's are" {
+    cloud_contract
+    cat >> "$TMP/c.yaml" <<'EOF'
+  - name: three
+    site: br1
+    mode: cloud_advanced
+    role: primary
+    urls: {}
+    proofs: [{secret: root, kind: shadow, user: root}, {secret: nope, kind: shadow, user: x}]
+  - name: four
+    site: br2
+    mode: cloud_advanced
+    role: replica
+    urls: [{url: 'ftp://x/', status: 99}]
+    proofs: {}
+  - name: five
+    site: br1
+    mode: cloud_advanced
+    role: witness
+    contract: core.yaml
+    urls: [{url: 'https://127.0.0.1/', status: 200}]
+EOF
+    printf 'contract: 1\nappliance: core\nsecrets: [root]\nquestions: [{id: r, hook: 30rootpass, prompt: R, answer: "secret:root"}]\nproofs: [{secret: root, kind: shadow, user: root}]\n' > "$TMP/core.yaml"
+    run "$KC" --check "$TMP/c.yaml"
+    echo "$output"
+    [ "$status" -eq 2 ]
+    for want in "node three: urls is not a list" "node three: proof of 'nope': not a declared secret" \
+        "node three: secret db has no proof" "node four: url 'ftp://x/' is not an http or https URL" \
+        "node four: url ftp://x/: status 99 is not an HTTP status" "node four: proofs is not a list" \
+        "node five: urls and proofs are for a node of this appliance: core.yaml has its own"; do
+        [[ "$output" == *"$want"* ]] || { echo "missing: $want"; return 1; }
+    done
+}
+
 @test "the text of a screenshot is a usable line" {
     small_contract
     printf 'screenshots:\n  - {name: a, url: /, text: "a\\tb"}\n  - {name: b, url: /, text: [1]}\n' >> "$TMP/c.yaml"

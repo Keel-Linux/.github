@@ -208,9 +208,13 @@ EOF
 shift 3
 "$@"
 EOF
+    # the answers of STATE/urls.VMID on that machine when the case wrote
+    # one, else of STATE/urls
     cat > "$GBIN/curl" <<'EOF'
 #!/bin/bash
-code=$(grep -F "${*: -1} " "$STATE/urls" 2>/dev/null | cut -d' ' -f2)
+urls="$STATE/urls.${KC_FAKE_VMID:-}"
+[ -e "$urls" ] || urls="$STATE/urls"
+code=$(grep -F "${*: -1} " "$urls" 2>/dev/null | cut -d' ' -f2)
 printf '%s' "${code:-000}"
 EOF
     cat > "$GBIN/getent" <<'EOF'
