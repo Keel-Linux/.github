@@ -22,7 +22,11 @@ setup() {
     mkdir -p "$FAKES" "$GBIN" "$STATE" "$GUEST/etc/default" "$GUEST/var/log" \
         "$GUEST/var/mail" "$GUEST/usr/lib/inithooks/firstboot.d" "$GUEST/9001/rootfs/etc"
     : > "$LOG"
-    export TMP FAKES GUEST GBIN STATE OUT LOG
+    RENDER="$BATS_TEST_DIRNAME/fixtures/commission/render.py"
+    # the console font of the fake PVE host: a test font, see render.py
+    KC_CONSOLE_FONT="$TMP/font.psf"
+    python3 -I "$RENDER" --font "$KC_CONSOLE_FONT"
+    export TMP FAKES GUEST GBIN STATE OUT LOG RENDER KC_CONSOLE_FONT
     export KC_PVE="$FAKES/pve" KC_POLL=1 KC_BOOT_TIMEOUT=2 KC_MAIL_WAIT=0
     export KC_CONSOLE_TIMEOUT=1 KC_CONSOLE_STEPS=3 KC_WEB_PROBE_PAUSE=0
     PATH="$FAKES:$PATH"
@@ -84,15 +88,17 @@ EOF
 
     # qm: the VM. Its screens are the files $STATE/screens/NN, one after the
     # other: each qm monitor input with a sendkey goes to the next one. A
-    # screen NOAGENT is one where the guest agent does not answer. After
-    # the last screen the first boot has ended. guest exec runs a guest
-    # script as pct exec does, and answers in JSON as qm does.
+    # screen NOAGENT is one that is no console text (a boot menu). After
+    # the last screen the first boot has ended. screendump draws the screen
+    # with the console font (render.py), so the real screentext.py reads
+    # it. qm agent network-get-interfaces gives $STATE/ip-6 and
+    # $STATE/ip-4, as qm does in JSON; guest exec is refused, as the
+    # allow-list of the image refuses it.
     cat > "$FAKES/qm" <<'EOF'
 #!/bin/bash
 printf 'qm %s\n' "$*" >> "$LOG"
 cur=$(cat "$STATE/cur" 2>/dev/null || echo 1)
 screen="$STATE/screens/$(printf %02d "$cur")"
-json() { python3 -c 'import json,sys; print(json.dumps({"exited": 1, "exitcode": int(sys.argv[1]), "out-data": sys.stdin.read()}))' "$1"; }
 case "$1" in
     status) [ -e "$STATE/vm-exists" ] ;;
     create) [ ! -e "$STATE/create-fails" ] && touch "$STATE/vm-exists" ;;
@@ -104,36 +110,73 @@ case "$1" in
         printf '%s\n' "$input" >> "$STATE/keys"
         if grep -q '^screendump ' <<< "$input"; then
             f=$(sed -n 's/^screendump //p' <<< "$input")
-            printf 'P6\n2 1\n255\nabcdef' > "$f"
-        fi
-        grep -q '^sendkey ' <<< "$input" && echo $((cur + 1)) > "$STATE/cur"
-        true ;;
-    guest)
-        [ -e "$screen" ] || cp "$STATE/boot-done" "$GUEST/etc/default/inithooks"
-        if [[ "$*" == *vcs1* ]]; then
             [ -e "$screen" ] || screen="$STATE/screens/last"
-            # time goes on while nobody answers: the next read is the next screen
             if grep -qx NOAGENT "$screen" 2>/dev/null; then
-                [ "$screen" = "$STATE/screens/last" ] || echo $((cur + 1)) > "$STATE/cur"
-                echo "QEMU guest agent is not running" >&2
-                exit 255
+                python3 -I "$RENDER" --graphic "$f"
+                # time goes on while nothing can be read: the next read of
+                # the screen is the next screen
+                if [[ "$f" == */screen.ppm ]] && [ "$screen" != "$STATE/screens/last" ]; then
+                    echo $((cur + 1)) > "$STATE/cur"
+                fi
+            else
+                python3 -I "$RENDER" "$screen" "$f"
             fi
-            # a progress screen (Please wait) goes on by itself after 4 reads
-            if grep -q 'Please wait' "$screen"; then
+            # a progress screen (Please wait) and a screen with no first boot
+            # title (the reboot) go on by themselves after 4 reads
+            if [[ "$f" == */screen.ppm ]] && [ "$screen" != "$STATE/screens/last" ] && ! grep -qx NOAGENT "$screen" \
+                && { grep -q 'Please wait' "$screen" || ! grep -q 'First boot configuration' "$screen"; }; then
                 reads=$(( $(cat "$STATE/reads" 2>/dev/null || echo 0) + 1 ))
                 echo "$reads" > "$STATE/reads"
                 [ "$reads" -lt 4 ] || { echo $((cur + 1)) > "$STATE/cur"; rm "$STATE/reads"; }
             fi
-            json 0 < "$screen"
-        else
-            out=$(sed -e "s#/etc/default/#$GUEST/etc/default/#g" -e "s#/var/#$GUEST/var/#g" \
-                -e "s#/usr/lib/inithooks/#$GUEST/usr/lib/inithooks/#g" \
-                | KC_FAKE_VMID="$3" PATH="$GBIN:$PATH" bash -s 2>/dev/null)
-            rc=$?
-            [ -e "$STATE/agent-hangs" ] && { printf '{"exited": 0}\n'; exit 0; }
-            printf '%s' "$out" | json "$rc"
-        fi ;;
+        fi
+        grep -q '^sendkey ' <<< "$input" && echo $((cur + 1)) > "$STATE/cur"
+        true ;;
+    agent)
+        [ -e "$STATE/no-agent" ] && { echo "QEMU guest agent is not running" >&2; exit 255; }
+        python3 -c 'import json, sys
+ips = [{"ip-address-type": "ipv6", "ip-address": "::1", "prefix": 128},
+       {"ip-address-type": "ipv6", "ip-address": "fe80::1", "prefix": 64},
+       {"ip-address-type": "ipv4", "ip-address": "bad", "prefix": 8}]
+for path, kind in ((sys.argv[1], "ipv6"), (sys.argv[2], "ipv4")):
+    try:
+        with open(path) as f:
+            ips += [{"ip-address-type": kind, "ip-address": f.read().strip(), "prefix": 64}]
+    except OSError:
+        pass
+print(json.dumps([{"name": "lo"}, {"name": "eth0", "ip-addresses": ips}]))' "$STATE/ip-6" "$STATE/ip-4" ;;
+    guest)
+        echo "Agent error: Command guest-exec has been disabled: the command is not allowed" >&2
+        exit 255 ;;
 esac
+EOF
+
+    # ssh of the PVE host to the VM: the password comes from SSH_ASKPASS
+    # and goes to $STATE/ssh-secret. A password that is not the root secret
+    # of the run is refused. The first boot ends when the last screen
+    # shows. The guest script runs as pct exec runs it.
+    cat > "$FAKES/ssh" <<'EOF'
+#!/bin/bash
+printf 'ssh %s\n' "$*" >> "$LOG"
+[ -e "$STATE/ssh-down" ] && { echo "ssh: connect to host: No route to host" >&2; exit 255; }
+pass=$("$SSH_ASKPASS" "root's password: ")
+printf '%s\n' "$pass" >> "$STATE/ssh-secret"
+if [ "$pass" != "$KC_SECRET_root" ]; then
+    echo "Permission denied, please try again." >&2
+    exit 255
+fi
+cur=$(cat "$STATE/cur" 2>/dev/null || echo 1)
+if [ -e "$STATE/screens/$(printf %02d "$cur")" ]; then
+    # a login before the end of the first boot: the root password can be
+    # another one then
+    echo "$cur" >> "$STATE/ssh-early"
+else
+    cp "$STATE/boot-done" "$GUEST/etc/default/inithooks"
+fi
+[ -e "$STATE/agent-hangs" ] && sleep 5
+sed -e "s#/etc/default/#$GUEST/etc/default/#g" -e "s#/var/#$GUEST/var/#g" \
+    -e "s#/usr/lib/inithooks/#$GUEST/usr/lib/inithooks/#g" \
+    | KC_FAKE_VMID=9001 PATH="$GBIN:$PATH" bash -s 2>/dev/null
 EOF
 
     # the browser of the web screenshots: one picture per shot line, and a
