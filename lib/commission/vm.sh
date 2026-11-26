@@ -3,14 +3,22 @@
 # VM with qm as an operator does, boots the ISO, installs it, and answers
 # the first boot of the disk on tty1.
 #
-# The screen is read as text through the QEMU guest agent of the ISO and of
-# the installed system (qemu-guest-agent is in the boot layer), from
-# /dev/vcs1: tkl-installer and inithooks both draw on tty1, and neither
-# writes to a serial console (BR1, 2026-11-05). The agent only reads. Every
-# answer goes in as keys through qm monitor (sendkey), and every screen the
-# driver acts on is saved as a PNG from qm monitor screendump, with its text.
-# Before the agent answers (the boot menu, the kernel, the reboot), a
-# screenshot is kept each time the picture changes.
+# The screen is read on the PVE host, with no agent in the guest: qm monitor
+# screendump gives the picture of tty1, and screentext.py reads its text
+# from the glyphs of the console font, which it reads on the PVE host when
+# it runs (the host's own console font, the VGA 8x16 font of Linux, or a
+# PSF named by KC_CONSOLE_FONT on the host). tkl-installer and
+# inithooks both draw on tty1, and neither writes to a serial console (BR1,
+# 2026-11-05). The QEMU guest agent of the image refuses guest-exec (common
+# PR 87, decision 0099), so the driver does not use it. Every answer goes in
+# as keys through qm monitor (sendkey), and every screen the driver acts on
+# is saved as a PNG from qm monitor screendump, with its text. While the
+# picture is no console text (the boot menu, the BIOS), a screenshot is
+# kept each time the picture changes.
+#
+# A command in the guest (the end of the first boot, the checks) goes over
+# SSH from the PVE host as root, with the root secret (vmhost.py exec), to
+# the address that qm agent network-get-interfaces gives.
 
 KC_VM_STORAGE="${KC_VM_STORAGE:-local-lvm}"
 KC_VM_OPTS="${KC_VM_OPTS:-}"
@@ -19,6 +27,10 @@ KC_VM_FIRMWARE="${KC_VM_FIRMWARE:-auto}"
 KC_PHASE_TIMEOUT="${KC_PHASE_TIMEOUT:-3600}"
 # where the helpers and the screenshots of a VM wait on the PVE host
 KC_HOST_TMP="${KC_HOST_TMP:-/tmp}"
+# the title of confconsole, which tty1 shows after the first boot
+KC_END_SCREEN="${KC_END_SCREEN:-Configuration Console}"
+# the back title of every inithooks screen of the first boot
+KC_FIRSTBOOT_SCREEN="${KC_FIRSTBOOT_SCREEN:-First boot configuration}"
 
 # vm_value KEY: memory, cores or disk of the contract's vm section.
 vm_value() {
@@ -60,15 +72,18 @@ vm_firmware() {
 # the VM has kvm64. The helpers the driver runs on the host go to
 # /tmp/kcVMID.
 vm_create() {
-    local bios="" firmware cpu
+    local bios="" firmware cpu file
     cpu=$(vm_cpu) || return 1
     firmware=$(vm_firmware "$1")
     if [ "$firmware" = ovmf ]; then
         bios="--bios ovmf --machine q35 --efidisk0 $KC_VM_STORAGE:1,efitype=4m,pre-enrolled-keys=0"
     fi
     pve_retry "qm create $KC_VMID --name kc$KC_VMID --memory $(vm_value memory) --cores $(vm_value cores)${cpu:+ --cpu $cpu} --ostype l26 --scsihw virtio-scsi-single --virtio0 $KC_VM_STORAGE:$(vm_value disk) --ide2 '$1',media=cdrom --boot 'order=virtio0;ide2' --agent enabled=1 --vga std $bios $KC_VM_OPTS" || return 1
-    pve "mkdir -p $KC_HOST_TMP/kc$KC_VMID && cat > $KC_HOST_TMP/kc$KC_VMID/ppm2png.py" < "$KC_LIB/ppm2png.py"
-    pve "cat > $KC_HOST_TMP/kc$KC_VMID/qga.py" < "$KC_LIB/qga.py"
+    # a run with --keep leaves the host key and the address of its VM
+    pve "mkdir -p $KC_HOST_TMP/kc$KC_VMID && rm -f $KC_HOST_TMP/kc$KC_VMID/known_hosts $KC_HOST_TMP/kc$KC_VMID/address" || return 1
+    for file in ppm2png.py screentext.py vmhost.py; do
+        pve "cat > $KC_HOST_TMP/kc$KC_VMID/$file" < "$KC_LIB/$file" || return 1
+    done
 }
 
 vm_start() {
@@ -81,16 +96,25 @@ vm_destroy() {
     pve "qm stop $KC_VMID >/dev/null 2>&1; qm destroy $KC_VMID --purge 1 >/dev/null 2>&1; rm -rf $KC_HOST_TMP/kc$KC_VMID; true"
 }
 
-# vm_guest_sh: guest_sh for a VM, through the guest agent.
+# vm_font: the PVE host has the console font that screentext.py needs; its
+# message goes to stderr when it has not.
+vm_font() {
+    pve "python3 $KC_HOST_TMP/kc$KC_VMID/screentext.py --font"
+}
+
+# vm_guest_sh: guest_sh for a VM, over SSH from the PVE host as root. The
+# root secret (every contract declares it) goes first on stdin, never on
+# a command line.
 vm_guest_sh() {
-    pve "python3 $KC_HOST_TMP/kc$KC_VMID/qga.py exec $KC_VMID"
+    { printf '%s\n' "${KC_SECRETS[root]}"; cat; } \
+        | pve "python3 $KC_HOST_TMP/kc$KC_VMID/vmhost.py exec $KC_VMID"
 }
 
 # vm_screen: the text of tty1, one line per row, trailing blanks and empty
-# rows out. Fails when the agent does not answer.
+# rows out. Fails when the picture is no console text.
 vm_screen() {
     local text
-    text=$(pve "python3 $KC_HOST_TMP/kc$KC_VMID/qga.py screen $KC_VMID" 2>/dev/null) || return 1
+    text=$(pve "python3 $KC_HOST_TMP/kc$KC_VMID/vmhost.py screen $KC_VMID" 2>/dev/null) || return 1
     sed -e 's/[[:space:]]*$//' <<< "$text" | grep -v '^$'
     return 0
 }
@@ -110,7 +134,7 @@ vm_shot() {
     local name
     KC_SHOT=$((KC_SHOT + 1))
     name=$(printf '%02d-%s' "$KC_SHOT" "$1")
-    pve "python3 $KC_HOST_TMP/kc$KC_VMID/qga.py shot $KC_VMID $KC_HOST_TMP/kc$KC_VMID/s.png >/dev/null && cat $KC_HOST_TMP/kc$KC_VMID/s.png" \
+    pve "python3 $KC_HOST_TMP/kc$KC_VMID/vmhost.py shot $KC_VMID $KC_HOST_TMP/kc$KC_VMID/s.png >/dev/null && cat $KC_HOST_TMP/kc$KC_VMID/s.png" \
         > "$KC_DIR/screens/$name.png" 2>/dev/null
     [ -z "${2:-}" ] || printf '%s\n' "$2" | mask_secrets > "$KC_DIR/screens/$name.txt"
     KC_NAME="$name.png"
@@ -136,8 +160,8 @@ screen_row() {
         "$(printf '%s' "$2" | python3 -I "$KC_LIB/contract.py" mask)" >> "$KC_DIR/screens.tsv"
 }
 
-# vm_boot_frame: before the agent answers, keep a screenshot when the
-# picture changed since the last one kept.
+# vm_boot_frame: while the picture is no console text, keep a screenshot
+# when it changed since the last one kept.
 vm_boot_frame() {
     local sum
     vm_shot "$1"
@@ -167,14 +191,17 @@ vm_match() {
 }
 
 # vm_capture TEXT: the invite lines and the VIP on the screen, once each,
-# as KC_INVITE and KC_VIP lines of the log.
+# as KC_INVITE and KC_VIP lines of the log. A line with a character that
+# screentext.py did not know (U+FFFD) gives nothing: a value is never
+# guessed.
 vm_capture() {
-    local row what value rows values regex
+    local row what value rows values regex known
+    known=$(grep -v $'\xef\xbf\xbd' <<< "$1" || true)
     mapfile -t rows < <(grep $'^capture\t' <<< "$KC_TSV" | cut -f2-)
     for row in "${rows[@]}"; do
         what="${row%%$'\t'*}"
         regex="${row#*$'\t'}"
-        mapfile -t values < <(python3 -I "$KC_LIB/contract.py" capture "${regex%$'\t'*}" <<< "$1")
+        mapfile -t values < <(python3 -I "$KC_LIB/contract.py" capture "${regex%$'\t'*}" <<< "$known")
         for value in "${values[@]}"; do
             grep -qxF "KC_${what^^} $value" "$KC_LOG" 2>/dev/null || echo "KC_${what^^} $value" >> "$KC_LOG"
         done
@@ -211,8 +238,9 @@ vm_act() {
 # vm_drive PHASE TABLE: answer the screens of the VM until the table's last
 # screen is answered (the installer) or the first boot has ended. A screen
 # is acted on once it stays the same for one poll. In the first boot, a
-# screen that is no entry of the table gets Enter, its default, after
-# KC_CONSOLE_TIMEOUT seconds; in the installer it only gets a screenshot.
+# screen of inithooks (KC_FIRSTBOOT_SCREEN on it) that is no entry of the
+# table gets Enter, its default, after KC_CONSOLE_TIMEOUT seconds; any other
+# screen only gets a screenshot.
 # Writes KC_SEEN, KC_DONE, KC_STUCK and KC_NOAGENT to KC_LOG.
 vm_drive() {
     local phase="$1" table="$2" text prev="" acted="" line poll still=0 idle=0 steps=0 quiet down end
@@ -246,7 +274,7 @@ vm_drive() {
         # the end of the first boot comes before any match: the screen after
         # it (confconsole, a login) can name a prompt, and a key typed there
         # is no answer (an answer typed at the login prompt, BR1 2026-11-05)
-        if [ "$phase" = firstboot ] && printf 'grep -qx RUN_FIRSTBOOT=false /etc/default/inithooks\n' | guest_sh >/dev/null 2>&1; then
+        if [ "$phase" = firstboot ] && vm_firstboot_over "$text"; then
             vm_shot "$phase-end" "$text"
             screen_row "$KC_NAME" ""
             echo "KC_DONE $phase" >> "$KC_LOG"
@@ -257,10 +285,13 @@ vm_drive() {
             vm_act "$line" "$text" || { echo "KC_DONE $phase" >> "$KC_LOG"; return 0; }
             continue
         fi
-        if [ "$phase" = installer ]; then
+        if [ "$phase" = installer ] || ! grep -qF -- "$KC_FIRSTBOOT_SCREEN" <<< "$text"; then
             # tkl-installer asks only what its table names: any other screen
             # is its progress, kept once, and an Enter there went to the next
-            # question and answered it (BR1, 2026-11-05)
+            # question and answered it (BR1, 2026-11-05). In the first boot,
+            # a screen with no first boot title (the kernel, a black screen
+            # while the VM reboots) is no question either: the picture is
+            # read now, where the agent was down before.
             if [ "$text" != "$acted" ]; then
                 acted="$text"
                 vm_shot "$phase-wait" "$text"
@@ -275,6 +306,15 @@ vm_drive() {
     done
     echo "KC_STUCK $phase" >> "$KC_LOG"
     return 1
+}
+
+# vm_firstboot_over TEXT: the first boot has ended. The guest is asked
+# over SSH only when confconsole shows on tty1 (KC_END_SCREEN), which comes
+# after the first boot: before the first boot sets the root password, a
+# login fails, and fail2ban of the image bans the PVE host after 3.
+vm_firstboot_over() {
+    grep -qF -- "$KC_END_SCREEN" <<< "$1" || return 1
+    printf 'grep -qx RUN_FIRSTBOOT=false /etc/default/inithooks\n' | guest_sh >/dev/null 2>&1
 }
 
 # vm_tables: the installer table and the first boot table (the node's
@@ -329,6 +369,7 @@ vm_record_cpu() {
 pass_vm() {
     vm_create "$KC_IMAGE" >/dev/null || die 3 "qm create failed"
     vm_record_cpu
+    vm_font || { vm_destroy; die 3 "the PVE host gives screentext.py no 8x16 console font"; }
     vm_start || die 3 "qm start failed"
     vm_tables
     vm_drive installer "$KC_WORK/installer"

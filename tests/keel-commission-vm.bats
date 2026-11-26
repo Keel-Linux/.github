@@ -2,8 +2,9 @@
 # keel-commission (decisions 0075 and 0076): the VM from the ISO, the web
 # screenshots, the nodes of the cloud modes and the guide, against the fake
 # PVE host of commission.bash. Its qm shows the screens a case writes to
-# $STATE/screens, one after the other, and answers guest exec in JSON as qm
-# does, so the real qga.py and ppm2png.py run on it.
+# $STATE/screens, one after the other, as pictures of screendump, and its
+# ssh runs the guest scripts, so the real vmhost.py, screentext.py and
+# ppm2png.py run on it.
 
 # The stand-ins are written in single quotes on purpose: they expand when
 # they run.
@@ -49,7 +50,8 @@ EOF
 }
 
 # screens NAME...: the screens of the VM in order; a name is a line of
-# text on that screen, or NOAGENT
+# text on a screen with the first boot title, PLAIN:TEXT a screen with only
+# TEXT on it, or NOAGENT
 screens() {
     local n=0 text
     mkdir -p "$STATE/screens"
@@ -57,11 +59,13 @@ screens() {
         n=$((n + 1))
         if [ "$text" = NOAGENT ]; then
             echo NOAGENT > "$STATE/screens/$(printf %02d "$n")"
+        elif [[ "$text" == PLAIN:* ]]; then
+            printf '%s\n' "${text#PLAIN:}" > "$STATE/screens/$(printf %02d "$n")"
         else
-            printf '  %s\n\n  < OK >\n' "$text" > "$STATE/screens/$(printf %02d "$n")"
+            printf ' Keel Linux - First boot configuration\n  %s\n\n  < OK >\n' "$text" > "$STATE/screens/$(printf %02d "$n")"
         fi
     done
-    printf '  confconsole: appliance services\n' > "$STATE/screens/last"
+    printf '  Keel Linux Configuration Console\n  confconsole: appliance services\n' > "$STATE/screens/last"
 }
 
 run_vm() {
@@ -234,28 +238,243 @@ EOF
     [ "$status" -eq 2 ]
 }
 
-@test "qga: the screen, a guest command and its status, a dead agent" {
+@test "screentext: real screens of a vm-iso pass read as /dev/vcs1 gave them" {
+    # BR1, 2026-11-09: screendump pictures, each with the vcs1 text the
+    # guest agent read beside it; the last has the cursor on a blank cell.
+    # The font is a real one: KC_TEST_CONSOLE_FONT (a PSF of the console
+    # font, for example saved from a PVE host), else the console of this
+    # machine when it can be read (root)
+    local name
+    if [ -n "${KC_TEST_CONSOLE_FONT:-}" ]; then
+        export KC_CONSOLE_FONT="$KC_TEST_CONSOLE_FONT"
+    else
+        unset KC_CONSOLE_FONT
+        python3 -I "$LIB/screentext.py" --font 2>/dev/null \
+            || skip "no console font: set KC_TEST_CONSOLE_FONT or run as root"
+    fi
+    for name in 05-separate_boot 06-scheme 15-root_password; do
+        run python3 -I "$LIB/screentext.py" --png "$BATS_TEST_DIRNAME/fixtures/commission/screens/$name.png"
+        [ "$status" -eq 0 ]
+        diff <(printf '%s\n' "$output" | sed 's/[[:space:]]*$//' | grep -v '^$') \
+            "$BATS_TEST_DIRNAME/fixtures/commission/screens/$name.txt"
+    done
+}
+
+@test "screentext: the font from a PSF 1 or 2 file or the console, else exit 3" {
+    run python3 -I "$LIB/screentext.py" --font
+    [ "$status" -eq 0 ]
+    # a PSF 2 file of 8 x 16, compressed
+    python3 -I -c 'import gzip, struct, sys
+glyphs = b"".join(bytes([c, 1]) + bytes(14) for c in range(256))
+head = b"\x72\xb5\x4a\x86" + struct.pack("<IIIIIII", 0, 32, 0, 256, 16, 16, 8)
+open(sys.argv[1], "wb").write(gzip.compress(head + glyphs))
+open(sys.argv[2], "wb").write(head[:20] + struct.pack("<III", 32, 16, 16) + glyphs * 2)
+open(sys.argv[3], "wb").write(head[:20] + struct.pack("<III", 32, 32, 16) + glyphs)' \
+        "$TMP/f2.psf.gz" "$TMP/wide.psf" "$TMP/short.psf"
+    KC_CONSOLE_FONT="$TMP/f2.psf.gz" run python3 -I "$LIB/screentext.py" --font
+    [ "$status" -eq 0 ]
+    KC_CONSOLE_FONT="$TMP/wide.psf" run python3 -I "$LIB/screentext.py" "$TMP/none.ppm"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"is 16x16, not 8x16"* ]]
+    KC_CONSOLE_FONT="$TMP/short.psf" run python3 -I "$LIB/screentext.py" --font
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"is short"* ]]
+    printf 'text' > "$TMP/no.psf"
+    KC_CONSOLE_FONT="$TMP/no.psf" run python3 -I "$LIB/screentext.py" --font
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"no PSF file"* ]]
+    KC_CONSOLE_FONT="$TMP/missing.psf" run python3 -I "$LIB/screentext.py" --font
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"KC_CONSOLE_FONT"* ]]
+    # no console to read: the message says what to do
+    run env -u KC_CONSOLE_FONT python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import screentext
+screentext.TTYS = (sys.argv[2],)
+sys.exit(screentext.main(["screentext", "--font"]))' "$LIB" "$TMP/no-tty"
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"no console font"*"Linux VGA 8x16 font"* ]]
+    # the console: KDFONTOP on a device that is no console fails, and a
+    # console font that the ioctl gives is read 32 rows a glyph
+    run env -u KC_CONSOLE_FONT python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import screentext
+screentext.TTYS = ("/dev/null",)
+sys.exit(screentext.main(["screentext", "--font"]))' "$LIB"
+    [ "$status" -eq 3 ]
+    run python3 -I -c 'import ctypes, sys; sys.path.insert(0, sys.argv[1]); import screentext
+def ioctl(fd, request, op):
+    assert request == screentext.KDFONTOP and op.op == 1
+    for code in range(256):
+        ctypes.memmove(op.data + code * 32, bytes([code, 1]) + bytes(14), 16)
+    op.width, op.height, op.charcount = 8, 16, 256
+screentext.fcntl.ioctl = ioctl
+w, h, glyphs = screentext.console_glyphs("/dev/null")
+print(w, h, len(glyphs), glyphs[65].hex())' "$LIB"
+    [ "$status" -eq 0 ]
+    [ "$output" = "8 16 256 41010000000000000000000000000000" ]
+    run python3 -I "$LIB/screentext.py" --png
+    [ "$status" -eq 2 ]
+}
+
+@test "screentext: the cursor, an unknown glyph, a picture that is no text" {
+    printf 'Root Password\n' > "$TMP/t"
+    python3 -I "$BATS_TEST_DIRNAME/fixtures/commission/render.py" "$TMP/t" "$TMP/t.ppm"
+    # the underline cursor inverts the 2 bottom rows of the cells of "Ro"
+    # and of a blank cell
+    python3 -I -c 'import sys
+d = bytearray(open(sys.argv[1], "rb").read())
+pos = len(b"P6\n640 400\n255\n")
+for y in (14, 15):
+    for x in list(range(0, 16)) + list(range(32, 40)):
+        i = pos + (y * 640 + x) * 3
+        d[i:i + 3] = b"\xaa\xaa\xaa" if d[i:i + 3] == b"\x00\x00\xaa" else b"\x00\x00\xaa"
+open(sys.argv[1], "wb").write(d)' "$TMP/t.ppm"
+    run python3 -I "$LIB/screentext.py" "$TMP/t.ppm"
+    [ "$status" -eq 0 ]
+    [ "$(head -1 <<< "$output")" = "Root Password" ]
+    # a cell of three colours is no glyph: it is marked, never guessed
+    python3 -I -c 'import sys
+d = bytearray(open(sys.argv[1], "rb").read())
+pos = len(b"P6\n640 400\n255\n")
+d[pos + 3:pos + 6] = b"\x12\x34\x56"
+open(sys.argv[1], "wb").write(d)' "$TMP/t.ppm"
+    run python3 -I "$LIB/screentext.py" "$TMP/t.ppm"
+    [ "$status" -eq 0 ]
+    [ "$(head -1 <<< "$output")" = $'�oot Password' ]
+    # a boot menu, a size that is no grid of cells, a file that is no picture
+    python3 -I "$BATS_TEST_DIRNAME/fixtures/commission/render.py" --graphic "$TMP/g.ppm"
+    run python3 -I "$LIB/screentext.py" "$TMP/g.ppm"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"are no known character"* ]]
+    printf 'P6\n9 16\n255\n%0432d' 0 > "$TMP/odd.ppm"
+    run python3 -I "$LIB/screentext.py" "$TMP/odd.ppm"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no grid"* ]]
+    printf 'nothing' > "$TMP/x.png"
+    run python3 -I "$LIB/screentext.py" --png "$TMP/x.png"
+    [ "$status" -eq 1 ]
+    run python3 -I "$LIB/screentext.py"
+    [ "$status" -eq 2 ]
+}
+
+@test "screentext: a PNG that ppm2png.py did not write is refused" {
+    python3 -I -c 'import struct, sys, zlib
+def chunk(k, b): return struct.pack(">I", len(b)) + k + b + struct.pack(">I", zlib.crc32(k + b))
+sig = b"\x89PNG\r\n\x1a\n"
+open(sys.argv[1], "wb").write(sig + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 16, 8, 6, 0, 0, 0)) + chunk(b"IEND", b""))
+rows = b"".join(b"\x01" + bytes(24) for _ in range(16))
+open(sys.argv[2], "wb").write(sig + chunk(b"IHDR", struct.pack(">IIBBBBB", 8, 16, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))' "$TMP/rgba.png" "$TMP/filter.png"
+    run python3 -I "$LIB/screentext.py" --png "$TMP/rgba.png"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not an 8-bit RGB PNG"* ]]
+    run python3 -I "$LIB/screentext.py" --png "$TMP/filter.png"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"filter"* ]]
+}
+
+# host_helpers: the helpers as vm_create puts them on the PVE host
+host_helpers() {
+    H="$TMP/h"
+    mkdir -p "$H"
+    cp "$LIB/vmhost.py" "$LIB/screentext.py" "$LIB/ppm2png.py" "$H"
+}
+
+@test "vmhost: the screen from screendump, with no guest exec" {
+    host_helpers
     screens "Root Password"
-    run python3 -I "$LIB/qga.py" screen 9001
+    run python3 -I "$H/vmhost.py" screen 9001
     [ "$status" -eq 0 ]
     [[ "$output" == *"Root Password"* ]]
-    run bash -c "printf 'echo out; echo err >&2; exit 3\n' | python3 -I '$LIB/qga.py' exec 9001"
+    [[ "$output" == *"< OK >"* ]]
+    [ ! -e "$H/screen.ppm" ]
+    run grep -c 'qm guest' "$LOG"
+    [ "$output" = 0 ]
+    # a picture that is no console text is not read
+    printf 'NOAGENT\n' > "$STATE/screens/01"
+    run python3 -I "$H/vmhost.py" screen 9001
+    [ "$status" -eq 1 ]
+    # no screendump at all
+    printf '#!/bin/bash\nexit 1\n' > "$FAKES/qm"
+    run python3 -I "$H/vmhost.py" screen 9001
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no screendump"* ]]
+    run python3 -I "$H/vmhost.py" shot 9001 "$TMP/x.png"
+    [ "$status" -eq 2 ]
+    run python3 -I "$H/vmhost.py"
+    [ "$status" -eq 2 ]
+}
+
+@test "vmhost: a guest command over SSH, the password by askpass" {
+    host_helpers
+    screens "Root Password"
+    export KC_SECRET_root=s3cretpass
+    printf '2001:db8::9\n' > "$STATE/ip-6"
+    printf '10.0.0.9\n' > "$STATE/ip-4"
+    run bash -c "printf 's3cretpass\necho out; echo err >&2; exit 3\n' | python3 -I '$H/vmhost.py' exec 9001"
     [ "$status" -eq 3 ]
     [[ "$output" == *out* ]]
+    [ "$(cat "$STATE/ssh-secret")" = s3cretpass ]
+    # the secret is on no command line, and the password is tried once
+    run grep -c s3cretpass "$LOG"
+    [ "$output" = 0 ]
+    grep -q 'ssh .*NumberOfPasswordPrompts=1.*root@' "$LOG"
+    # of two addresses, none answers on port 22: the first, IPv6, is used,
+    # and not kept, so the next command probes again
+    grep -q 'ssh .*root@2001:db8::9 ' "$LOG"
+    [ ! -e "$H/address" ]
+    # the kept address is used again while the agent gives it
+    printf '10.0.0.9\n' > "$H/address"
+    run bash -c "printf 's3cretpass\ntrue\n' | python3 -I '$H/vmhost.py' exec 9001"
+    [ "$status" -eq 0 ]
+    tail -1 "$LOG" | grep -q 'root@10.0.0.9 '
+    # a wrong password and an ssh that does not connect are status 1
+    run bash -c "printf 'wrong\ntrue\n' | python3 -I '$H/vmhost.py' exec 9001"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"ssh to 10.0.0.9 failed"* ]]
+    touch "$STATE/ssh-down"
+    run bash -c "printf 's3cretpass\ntrue\n' | python3 -I '$H/vmhost.py' exec 9001"
+    [ "$status" -eq 1 ]
+    rm "$STATE/ssh-down"
+    # a command that does not end in its time
     touch "$STATE/agent-hangs"
-    run bash -c "echo true | python3 -I '$LIB/qga.py' exec 9001"
+    run bash -c "printf 's3cretpass\ntrue\n' | KC_GUEST_TIMEOUT=1 python3 -I '$H/vmhost.py' exec 9001"
     [ "$status" -eq 124 ]
-    printf 'NOAGENT\n' > "$STATE/screens/01"
-    run python3 -I "$LIB/qga.py" screen 9001
-    [ "$status" -eq 1 ]
-    printf '#!/bin/bash\nexit 1\n' > "$FAKES/qm"
-    run bash -c "echo true | python3 -I '$LIB/qga.py' exec 9001"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"does not answer"* ]]
-    run python3 -I "$LIB/qga.py" shot 9001 "$TMP/x.png"
+    rm "$STATE/agent-hangs"
+    # no password, no address from the agent
+    run bash -c "printf '\ntrue\n' | python3 -I '$H/vmhost.py' exec 9001"
     [ "$status" -eq 2 ]
-    run python3 -I "$LIB/qga.py"
-    [ "$status" -eq 2 ]
+    touch "$STATE/no-agent"
+    run bash -c "printf 's3cretpass\ntrue\n' | python3 -I '$H/vmhost.py' exec 9001"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"gives no address"* ]]
+    printf '#!/bin/bash\necho not json\n' > "$FAKES/qm"
+    run bash -c "printf 's3cretpass\ntrue\n' | python3 -I '$H/vmhost.py' exec 9001"
+    [ "$status" -eq 1 ]
+}
+
+@test "vmhost: with one address it is used with no probe" {
+    host_helpers
+    export KC_SECRET_root=pw
+    printf '10.0.0.9\n' > "$STATE/ip-4"
+    run bash -c "printf 'pw\ntrue\n' | python3 -I '$H/vmhost.py' exec 9001"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$H/address")" = 10.0.0.9 ]
+}
+
+@test "vmhost: of two addresses the one that answers on port 22" {
+    host_helpers
+    export KC_SECRET_root=pw
+    printf '2001:db8::9\n' > "$STATE/ip-6"
+    printf '127.0.0.1\n' > "$STATE/ip-4"
+    # a loopback address is never used: it would reach the PVE host itself
+    run bash -c "printf 'pw\ntrue\n' | python3 -I '$H/vmhost.py' exec 9001"
+    [ "$(cat "$H/address")" = 2001:db8::9 ]
+    rm "$H/address"
+    run python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import socket, vmhost
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen()
+vmhost.SSH_PORT = s.getsockname()[1]
+vmhost.addresses = lambda vmid: ["192.0.2.1", "127.0.0.1"]
+vmhost.PROBE_TIMEOUT = 1
+print(vmhost.address("9001"))' "$H"
+    [ "$status" -eq 0 ]
+    [ "$output" = 127.0.0.1 ]
 }
 
 @test "guide.py: one column per node, rows in order, and its usage" {
@@ -279,15 +498,30 @@ EOF
 
 # ---- the VM from the ISO --------------------------------------------------
 
+@test "vm-iso: a PVE host with no 8x16 console font stops the pass before the boot" {
+    vm_setup
+    screens "Choose a partitioning scheme:"
+    export KC_CONSOLE_FONT="$TMP/missing.psf"
+    run_vm
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"no 8x16 console font"* ]]
+    [[ "$output" == *"KC_CONSOLE_FONT"* ]]
+    run grep -c 'qm start' "$LOG"
+    [ "$output" = 0 ]
+    grep -q 'qm destroy 9001 --purge 1' "$LOG"
+}
+
 @test "vm-iso: the install and the first boot are answered, each screen is kept" {
     vm_setup
     screens NOAGENT "Choose a partitioning scheme:" "Begin installation?" \
         "Stage: Running Post-Install Commands. Please wait..." \
-        "Please REMOVE the live installation medium" NOAGENT \
+        "Please REMOVE the live installation medium" NOAGENT "PLAIN:" \
+        "PLAIN:[    2.1] systemd[1]: Started Journal Service." \
         "Root Password Choose how to set this password:" "Root Password Please enter new password" \
         "Root Password Confirm password" "App password" "System Notifications" \
         "Something nobody declared" "Something nobody declared" \
-        "Invite: keel1:ABC through fd00::7" "Security updates"
+        "Invite: keel1:ABC through fd00::7" "Security updates" \
+        $'Invite: keel1:XY\ufffd through fd00::8'
     run_vm
     echo "$output"
     for want in "pass  installer.asked.scheme" "pass  installer.asked.medium" \
@@ -326,8 +560,19 @@ EOF
     # what the first node of a cloud mode shows, read from the screen once
     [ "$(grep -cx 'KC_INVITE keel1:ABC' "$OUT/vm-iso/console.log")" -eq 1 ]
     grep -qx 'KC_VIP fd00::7' "$OUT/vm-iso/console.log"
+    # the black screen and the kernel text of the reboot get no key, only
+    # a screenshot
+    grep -l 'Started Journal Service' "$s"/*-firstboot-wait.txt
+    # a line with a cell that is no known glyph gives no value
+    run grep -c 'keel1:XY\|fd00::8' "$OUT/vm-iso/console.log"
+    [ "$output" = 0 ]
     # a screen that stays the same after its Enter gets Enter again, later
-    [ "$(ls "$s" | grep -c 'firstboot-screen.png')" -eq 3 ]
+    [ "$(ls "$s" | grep -c 'firstboot-screen.png')" -eq 4 ]
+    # no guest exec; SSH only after the first boot, with the root secret
+    run grep -c 'qm guest' "$LOG"
+    [ "$output" = 0 ]
+    [ ! -e "$STATE/ssh-early" ]
+    [ "$(sort -u "$STATE/ssh-secret")" = "$root" ]
     # the installer's progress gets a screenshot and no key
     ls "$s" | grep -q 'installer-wait.png'
     grep -q $'\tinstaller-wait\tscreens/[0-9]*-installer-wait.png\t$' "$OUT/vm-iso/screens.tsv"
